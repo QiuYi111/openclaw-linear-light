@@ -9,7 +9,6 @@
     "index.ts",
     "src/",
     "openclaw.plugin.json",
-    "prompts.yaml",
     "README.md"
   ],
   "scripts": {

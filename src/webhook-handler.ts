@@ -19,6 +19,16 @@ const recentlyProcessed = new Map<string, number>();
 const DEDUP_TTL_MS = 60_000;
 let lastSweep = Date.now();
 
+// Concurrent run guard — prevents two webhooks for the same issue from spawning
+// parallel agent sessions (e.g. "created" followed quickly by "prompted").
+const activeRuns = new Set<string>();
+
+export function clearActiveRun(sessionKey: string): void {
+  if (sessionKey.startsWith("linear:")) {
+    activeRuns.delete(sessionKey);
+  }
+}
+
 function wasRecentlyProcessed(key: string): boolean {
   const now = Date.now();
   if (now - lastSweep > 10_000) {
@@ -51,7 +61,7 @@ function verifySignature(rawBody: Buffer, signature: string, secret: string): bo
 /**
  * Read JSON body from request (Node.js IncomingMessage style)
  */
-async function readBody(req: any, maxBytes = 1_000_000): Promise<{ ok: boolean; body?: any; raw?: string; error?: string }> {
+async function readBody(req: any, maxBytes = 1_000_000): Promise<{ ok: boolean; body?: any; rawBuffer?: Buffer; error?: string }> {
   return new Promise((resolve) => {
     const chunks: Buffer[] = [];
     let total = 0;
@@ -80,8 +90,8 @@ async function readBody(req: any, maxBytes = 1_000_000): Promise<{ ok: boolean; 
       settled = true;
       clearTimeout(timer);
       try {
-        const raw = Buffer.concat(chunks).toString("utf8");
-        resolve({ ok: true, body: JSON.parse(raw), raw });
+        const rawBuffer = Buffer.concat(chunks);
+        resolve({ ok: true, body: JSON.parse(rawBuffer.toString("utf8")), rawBuffer });
       } catch {
         resolve({ ok: false, error: "invalid json" });
       }
@@ -122,22 +132,26 @@ export async function handleWebhook(
     return;
   }
 
-  const { ok, body, raw, error } = await readBody(req);
-  if (!ok || !raw) {
+  const { ok, body, rawBuffer, error } = await readBody(req);
+  if (!ok || !rawBuffer) {
     res.writeHead(400, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ error: error || "bad request" }));
     return;
   }
 
-  if (!verifySignature(Buffer.from(raw), signature, secret)) {
+  if (!verifySignature(rawBuffer, signature, secret)) {
     api.logger.warn("Linear Light: invalid webhook signature");
     res.writeHead(401, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ error: "invalid signature" }));
     return;
   }
 
-  // Dedup
-  const dedupKey = `${body.type}:${body.action}:${body.data?.id || body.createdAt}`;
+  // Dedup — use payload-type-aware ID
+  const eventId =
+    body.agentSession?.id || // AgentSessionEvent
+    body.data?.id || // Comment / Issue
+    body.createdAt;
+  const dedupKey = `${body.type}:${body.action}:${eventId}`;
   if (wasRecentlyProcessed(dedupKey)) {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ ok: true, deduped: true }));
@@ -223,7 +237,15 @@ async function handleSessionCreated(
   const issue = session.issue;
   const comment = session.comment;
   const issueId = issue.id;
-  const sessionKey = `linear:${issueId}`;
+  const sessionPrefix = (config?.sessionPrefix as string) || "linear:";
+  const sessionKey = `${sessionPrefix}${issueId}`;
+
+  // Guard: skip if an agent is already running for this issue
+  if (activeRuns.has(sessionKey)) {
+    api.logger.info(`Linear Light: agent already running for ${issue.identifier}, skipping`);
+    return;
+  }
+  activeRuns.add(sessionKey);
 
   // Determine prompt content
   // If triggered by @mention, use the comment body
@@ -308,6 +330,8 @@ async function handleSessionPrompted(
   const issueId = session.issue.id;
   const sessionKey = `linear:${issueId}`;
 
+  const sessionPrefix = (config?.sessionPrefix as string) || "linear:";
+  const sessionKey = `${sessionPrefix}${issueId}`;
   const prompt = sanitizePromptInput(activity.content.body);
 
   const message = [

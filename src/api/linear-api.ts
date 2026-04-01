@@ -165,10 +165,8 @@ export class LinearAgentApi {
   }
 
   private authHeader(): string {
-    // Cyrus tokens (lin_oauth_*) use Bearer prefix
-    return this.accessToken.startsWith("lin_")
-      ? this.accessToken
-      : `Bearer ${this.accessToken}`;
+    // OAuth tokens require Bearer prefix; personal API keys do not
+    return this.refreshToken ? `Bearer ${this.accessToken}` : this.accessToken;
   }
 
   private async gql<T = unknown>(
