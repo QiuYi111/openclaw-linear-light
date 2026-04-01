@@ -257,11 +257,13 @@ async function handleSessionCreated(
   }
 
   // Build the message for the agent
+  const safeTitle = sanitizePromptInput(issue.title, 200);
+  const safeDescription = issue.description ? sanitizePromptInput(issue.description) : "";
   const sanitizedPrompt = sanitizePromptInput(prompt);
 
   const message = [
-    `[Linear Issue ${issue.identifier}] ${issue.title}`,
-    issue.description ? `\n---\n${issue.description}` : "",
+    `[Linear Issue ${issue.identifier}] ${safeTitle}`,
+    safeDescription ? `\n---\n${safeDescription}` : "",
     isMentionTriggered ? `\n---\n**User comment:**\n${sanitizedPrompt}` : "",
     `\n---\nIssue URL: ${issue.url}`,
     `\nUse linear_comment() to reply on the issue, linear_update_status() to change status.`,
