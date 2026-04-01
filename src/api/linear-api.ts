@@ -104,8 +104,11 @@ export class LinearAgentApi {
     }
 
     const payload = await res.json();
-    if (payload.errors?.length && !payload.data) {
-      throw new Error(`Linear GraphQL: ${JSON.stringify(payload.errors)}`);
+    if (payload.errors?.length) {
+      console.warn(`Linear GraphQL partial errors: ${JSON.stringify(payload.errors)}`);
+      if (!payload.data) {
+        throw new Error(`Linear GraphQL: ${JSON.stringify(payload.errors)}`);
+      }
     }
 
     return payload.data as T;
