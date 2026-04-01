@@ -51,7 +51,7 @@ function verifySignature(rawBody: Buffer, signature: string, secret: string): bo
 /**
  * Read JSON body from request (Node.js IncomingMessage style)
  */
-async function readBody(req: any, maxBytes = 1_000_000): Promise<{ ok: boolean; body?: any; raw?: string; error?: string }> {
+async function readBody(req: any, maxBytes = 1_000_000): Promise<{ ok: boolean; body?: any; rawBuffer?: Buffer; error?: string }> {
   return new Promise((resolve) => {
     const chunks: Buffer[] = [];
     let total = 0;
@@ -80,8 +80,8 @@ async function readBody(req: any, maxBytes = 1_000_000): Promise<{ ok: boolean; 
       settled = true;
       clearTimeout(timer);
       try {
-        const raw = Buffer.concat(chunks).toString("utf8");
-        resolve({ ok: true, body: JSON.parse(raw), raw });
+        const rawBuffer = Buffer.concat(chunks);
+        resolve({ ok: true, body: JSON.parse(rawBuffer.toString("utf8")), rawBuffer });
       } catch {
         resolve({ ok: false, error: "invalid json" });
       }
@@ -122,14 +122,14 @@ export async function handleWebhook(
     return;
   }
 
-  const { ok, body, raw, error } = await readBody(req);
-  if (!ok || !raw) {
+  const { ok, body, rawBuffer, error } = await readBody(req);
+  if (!ok || !rawBuffer) {
     res.writeHead(400, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ error: error || "bad request" }));
     return;
   }
 
-  if (!verifySignature(Buffer.from(raw), signature, secret)) {
+  if (!verifySignature(rawBuffer, signature, secret)) {
     api.logger.warn("Linear Light: invalid webhook signature");
     res.writeHead(401, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ error: "invalid signature" }));
