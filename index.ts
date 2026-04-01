@@ -69,6 +69,9 @@ function createLinearTools(api: OpenClawPluginApi, ctx: any) {
   const linearApi = new LinearAgentApi(tokenInfo.accessToken, {
     refreshToken: tokenInfo.refreshToken,
     expiresAt: tokenInfo.expiresAt,
+    clientId: (config?.linearClientId as string) || process.env.LINEAR_CLIENT_ID,
+    clientSecret: (config?.linearClientSecret as string) || process.env.LINEAR_CLIENT_SECRET,
+    source: tokenInfo.source,
   });
 
   return [
@@ -156,6 +159,9 @@ async function onAgentEnd(api: OpenClawPluginApi, event: any) {
   const linearApi = new LinearAgentApi(tokenInfo.accessToken, {
     refreshToken: tokenInfo.refreshToken,
     expiresAt: tokenInfo.expiresAt,
+    clientId: (config?.linearClientId as string) || process.env.LINEAR_CLIENT_ID,
+    clientSecret: (config?.linearClientSecret as string) || process.env.LINEAR_CLIENT_SECRET,
+    source: tokenInfo.source,
   });
 
   const success = event?.success !== false;

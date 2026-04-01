@@ -247,6 +247,9 @@ async function handleSessionCreated(
         const linearApi = new LinearAgentApi(tokenInfo.accessToken, {
           refreshToken: tokenInfo.refreshToken,
           expiresAt: tokenInfo.expiresAt,
+          clientId: (config?.linearClientId as string) || process.env.LINEAR_CLIENT_ID,
+          clientSecret: (config?.linearClientSecret as string) || process.env.LINEAR_CLIENT_SECRET,
+          source: tokenInfo.source,
         });
         await linearApi.updateIssueState(issueId, "In Progress");
         api.logger.info(`Linear Light: ${issue.identifier} → In Progress`);
@@ -304,6 +307,7 @@ async function handleSessionPrompted(
 
   const issueId = session.issue.id;
   const sessionKey = `linear:${issueId}`;
+
   const prompt = sanitizePromptInput(activity.content.body);
 
   const message = [
