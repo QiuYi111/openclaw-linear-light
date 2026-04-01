@@ -328,6 +328,8 @@ async function handleSessionPrompted(
   }
 
   const issueId = session.issue.id;
+  const sessionKey = `linear:${issueId}`;
+
   const sessionPrefix = (config?.sessionPrefix as string) || "linear:";
   const sessionKey = `${sessionPrefix}${issueId}`;
   const prompt = sanitizePromptInput(activity.content.body);
