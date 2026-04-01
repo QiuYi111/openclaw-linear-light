@@ -12,10 +12,9 @@
  * - cyrus linear-event-transport: webhook verification, message translation
  */
 
-import { createHmac, timingSafeEqual } from "node:crypto";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { resolveLinearToken, LinearAgentApi } from "./api/linear-api.js";
-import { handleWebhook } from "./webhook-handler.js";
+import { handleWebhook, agentSessionMap } from "./webhook-handler.js";
 
 export default function register(api: OpenClawPluginApi) {
   const config = api.pluginConfig as Record<string, unknown> | undefined;
@@ -84,11 +83,31 @@ function createLinearTools(api: OpenClawPluginApi, ctx: any) {
         required: ["issueId", "body"],
       },
       execute: async ({ issueId, body }: { issueId: string; body: string }) => {
+        const agentSessionId = agentSessionMap.get(issueId);
         try {
           await linearApi.createComment(issueId, body);
+
+          // Emit response activity so Linear shows progress
+          if (agentSessionId) {
+            try {
+              await linearApi.emitActivity(agentSessionId, { type: "response", body });
+            } catch (activityErr) {
+              api.logger.warn(`Linear Light: failed to emit activity: ${activityErr}`);
+            }
+          }
+
           return `Comment posted on issue ${issueId}`;
         } catch (err) {
-          return `Failed to comment: ${err instanceof Error ? err.message : String(err)}`;
+          const msg = err instanceof Error ? err.message : String(err);
+
+          // Emit error activity
+          if (agentSessionId) {
+            try {
+              await linearApi.emitActivity(agentSessionId, { type: "error", body: `Failed to comment: ${msg}` });
+            } catch {}
+          }
+
+          return `Failed to comment: ${msg}`;
         }
       },
     },
@@ -160,6 +179,16 @@ async function onAgentEnd(api: OpenClawPluginApi, event: any) {
 
   const success = event?.success !== false;
 
+  // Emit error activity if session failed
+  if (!success) {
+    const agentSessionId = agentSessionMap.get(issueId);
+    if (agentSessionId) {
+      try {
+        await linearApi.emitActivity(agentSessionId, { type: "error", body: "Agent session failed" });
+      } catch {}
+    }
+  }
+
   try {
     if (success && config?.notifyOnComplete !== false) {
       // Update status to Done
@@ -184,5 +213,7 @@ async function onAgentEnd(api: OpenClawPluginApi, event: any) {
     }
   } catch (err) {
     api.logger.error(`Linear Light: onAgentEnd failed for ${issueId}: ${err}`);
+  } finally {
+    agentSessionMap.delete(issueId);
   }
 }

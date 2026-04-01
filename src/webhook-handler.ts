@@ -16,6 +16,9 @@ import { sanitizePromptInput } from "./utils.js";
 
 // Dedup tracking
 const recentlyProcessed = new Map<string, number>();
+
+// Maps issueId → Linear agent session ID, so tools can emit activity updates
+export const agentSessionMap = new Map<string, string>();
 const DEDUP_TTL_MS = 60_000;
 let lastSweep = Date.now();
 
@@ -235,22 +238,28 @@ async function handleSessionCreated(
     ? commentBody
     : issue.description || issue.title;
 
+  // Store agent session ID for activity emission
+  const agentSessionId = session.id as string | undefined;
+  if (agentSessionId) {
+    agentSessionMap.set(issueId, agentSessionId);
+  }
+
   api.logger.info(
     `Linear Light: session created for ${issue.identifier} (${isMentionTriggered ? "mention" : "auto"})`,
   );
 
+  // Resolve Linear API for status update and activity emission
+  const tokenInfo = resolveLinearToken(config);
+
   // Update issue status to In Progress
-  if (config?.autoInProgress !== false) {
+  if (config?.autoInProgress !== false && tokenInfo.accessToken) {
     try {
-      const tokenInfo = resolveLinearToken(config);
-      if (tokenInfo.accessToken) {
-        const linearApi = new LinearAgentApi(tokenInfo.accessToken, {
-          refreshToken: tokenInfo.refreshToken,
-          expiresAt: tokenInfo.expiresAt,
-        });
-        await linearApi.updateIssueState(issueId, "In Progress");
-        api.logger.info(`Linear Light: ${issue.identifier} → In Progress`);
-      }
+      const linearApi = new LinearAgentApi(tokenInfo.accessToken, {
+        refreshToken: tokenInfo.refreshToken,
+        expiresAt: tokenInfo.expiresAt,
+      });
+      await linearApi.updateIssueState(issueId, "In Progress");
+      api.logger.info(`Linear Light: ${issue.identifier} → In Progress`);
     } catch (err) {
       api.logger.warn(`Linear Light: failed to update status: ${err}`);
     }
@@ -278,6 +287,22 @@ async function handleSessionCreated(
     deliver: false,
   });
 
+  // Emit initial activity so Linear shows the session as active
+  if (agentSessionId && tokenInfo.accessToken) {
+    try {
+      const linearApi = new LinearAgentApi(tokenInfo.accessToken, {
+        refreshToken: tokenInfo.refreshToken,
+        expiresAt: tokenInfo.expiresAt,
+      });
+      await linearApi.emitActivity(agentSessionId, {
+        type: "thought",
+        body: `Starting work on ${issue.identifier}: ${issue.title}`,
+      });
+    } catch (err) {
+      api.logger.warn(`Linear Light: failed to emit initial activity: ${err}`);
+    }
+  }
+
   api.logger.info(`Linear Light: dispatched agent for ${issue.identifier}`);
 }
 
@@ -304,6 +329,12 @@ async function handleSessionPrompted(
 
   const issueId = session.issue.id;
   const sessionKey = `linear:${issueId}`;
+
+  // Ensure agent session ID is available for activity emission
+  const agentSessionId = session.id as string | undefined;
+  if (agentSessionId) {
+    agentSessionMap.set(issueId, agentSessionId);
+  }
   const prompt = sanitizePromptInput(activity.content.body);
 
   const message = [
