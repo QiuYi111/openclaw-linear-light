@@ -325,7 +325,9 @@ async function handleSessionPrompted(
 
 /**
  * Handle comment create events (fallback for non-agent-session setups)
- * If the comment contains the trigger text, treat it as a request
+ * If the comment contains the trigger text, treat it as a request.
+ * This path is used when Linear Agent Sessions are not available —
+ * the webhook receives Comment events directly instead of AgentSessionEvent.
  */
 async function handleCommentCreate(
   api: OpenClawPluginApi,
@@ -342,7 +344,62 @@ async function handleCommentCreate(
     return;
   }
 
-  // Already handled by AgentSessionEvent if agent sessions are enabled
-  // This is a fallback path
-  api.logger.debug(`Linear Light: comment trigger detected (fallback path), skipping — AgentSessionEvent should handle this`);
+  const issueId = comment.issue.id;
+  const sessionKey = `linear:${issueId}`;
+
+  api.logger.info(`Linear Light: comment trigger detected (fallback path) for issue ${issueId}`);
+
+  // Resolve Linear API to fetch full issue details and update status
+  const tokenInfo = resolveLinearToken(config);
+  if (!tokenInfo.accessToken) {
+    api.logger.warn("Linear Light: comment fallback triggered but no Linear API token available");
+    return;
+  }
+
+  const linearApi = new LinearAgentApi(tokenInfo.accessToken, {
+    refreshToken: tokenInfo.refreshToken,
+    expiresAt: tokenInfo.expiresAt,
+  });
+
+  let issue;
+  try {
+    issue = await linearApi.getIssueDetails(issueId);
+  } catch (err) {
+    api.logger.error(`Linear Light: failed to fetch issue ${issueId}: ${err}`);
+    return;
+  }
+
+  // Update issue status to In Progress
+  if (config?.autoInProgress !== false) {
+    try {
+      await linearApi.updateIssueState(issueId, "In Progress");
+      api.logger.info(`Linear Light: ${issue.identifier} → In Progress`);
+    } catch (err) {
+      api.logger.warn(`Linear Light: failed to update status: ${err}`);
+    }
+  }
+
+  // Build the message for the agent
+  const sanitizedPrompt = sanitizePromptInput(comment.body);
+
+  const message = [
+    `[Linear Issue ${issue.identifier}] ${issue.title}`,
+    issue.description ? `\n---\n${issue.description}` : "",
+    `\n---\n**User comment:**\n${sanitizedPrompt}`,
+    `\n---\nIssue URL: ${issue.url}`,
+    `\nUse linear_comment() to reply on the issue, linear_update_status() to change status.`,
+    `\nWhen done, update status to "Done" and I'll notify the user for review.`,
+  ].join("\n");
+
+  // Dispatch to OpenClaw agent with session key for continuity
+  await api.runAgent({
+    message,
+    sessionKey,
+    agentId: "main",
+    name: "Linear",
+    wakeMode: "now",
+    deliver: false,
+  });
+
+  api.logger.info(`Linear Light: dispatched agent for ${issue.identifier} (comment fallback)`);
 }
