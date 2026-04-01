@@ -15,7 +15,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { resolveLinearToken, LinearAgentApi } from "./api/linear-api.js";
-import { handleWebhook } from "./webhook-handler.js";
+import { handleWebhook, clearActiveRun } from "./webhook-handler.js";
 
 export default function register(api: OpenClawPluginApi) {
   const config = api.pluginConfig as Record<string, unknown> | undefined;
@@ -69,6 +69,9 @@ function createLinearTools(api: OpenClawPluginApi, ctx: any) {
   const linearApi = new LinearAgentApi(tokenInfo.accessToken, {
     refreshToken: tokenInfo.refreshToken,
     expiresAt: tokenInfo.expiresAt,
+    clientId: (config?.linearClientId as string) || process.env.LINEAR_CLIENT_ID,
+    clientSecret: (config?.linearClientSecret as string) || process.env.LINEAR_CLIENT_SECRET,
+    source: tokenInfo.source,
   });
 
   return [
@@ -145,6 +148,9 @@ async function onAgentEnd(api: OpenClawPluginApi, event: any) {
   const sessionKey = event?.sessionKey as string | undefined;
   if (!sessionKey?.startsWith("linear:")) return;
 
+  // Clear the concurrent run guard so future webhooks can dispatch again
+  clearActiveRun(sessionKey);
+
   const config = api.pluginConfig as Record<string, unknown> | undefined;
   const tokenInfo = resolveLinearToken(config);
   if (!tokenInfo.accessToken) return;
@@ -156,6 +162,9 @@ async function onAgentEnd(api: OpenClawPluginApi, event: any) {
   const linearApi = new LinearAgentApi(tokenInfo.accessToken, {
     refreshToken: tokenInfo.refreshToken,
     expiresAt: tokenInfo.expiresAt,
+    clientId: (config?.linearClientId as string) || process.env.LINEAR_CLIENT_ID,
+    clientSecret: (config?.linearClientSecret as string) || process.env.LINEAR_CLIENT_SECRET,
+    source: tokenInfo.source,
   });
 
   const success = event?.success !== false;

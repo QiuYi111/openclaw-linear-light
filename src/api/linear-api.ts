@@ -5,11 +5,14 @@
  * Borrowed from openclaw-linear-plugin (calltelemetry/openclaw-linear-plugin).
  */
 
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
 const LINEAR_GRAPHQL_URL = "https://api.linear.app/graphql";
+const LINEAR_OAUTH_TOKEN_URL = "https://api.linear.app/oauth/token";
+const CYRUS_CONFIG_PATH = join(homedir(), ".cyrus", "config.json");
+const REFRESH_BUFFER_MS = 60_000; // refresh 60s before expiry
 
 export type ActivityContent =
   | { type: "thought"; body: string }
@@ -37,7 +40,7 @@ export function resolveLinearToken(pluginConfig?: Record<string, unknown>): {
   // 2. Cyrus config (~/.cyrus/config.json) — reuse existing OAuth token
   try {
     const cyrusConfig = JSON.parse(
-      readFileSync(join(homedir(), ".cyrus", "config.json"), "utf8"),
+      readFileSync(CYRUS_CONFIG_PATH, "utf8"),
     );
 
     const workspaces = cyrusConfig?.linearWorkspaces;
@@ -47,6 +50,7 @@ export function resolveLinearToken(pluginConfig?: Record<string, unknown>): {
         return {
           accessToken: firstWorkspace.linearToken,
           refreshToken: firstWorkspace.linearRefreshToken,
+          expiresAt: firstWorkspace.linearTokenExpiresAt,
           source: "cyrus",
         };
       }
@@ -71,11 +75,93 @@ export class LinearAgentApi {
   private accessToken: string;
   private refreshToken?: string;
   private expiresAt?: number;
+  private clientId?: string;
+  private clientSecret?: string;
+  private tokenSource?: string;
 
-  constructor(accessToken: string, opts?: { refreshToken?: string; expiresAt?: number }) {
+  constructor(accessToken: string, opts?: {
+    refreshToken?: string;
+    expiresAt?: number;
+    clientId?: string;
+    clientSecret?: string;
+    source?: string;
+  }) {
     this.accessToken = accessToken;
     this.refreshToken = opts?.refreshToken;
     this.expiresAt = opts?.expiresAt;
+    this.clientId = opts?.clientId;
+    this.clientSecret = opts?.clientSecret;
+    this.tokenSource = opts?.source;
+  }
+
+  /**
+   * Refresh the OAuth token if it has expired or is about to expire.
+   * Requires refreshToken, clientId, and clientSecret.
+   */
+  private async ensureValidToken(): Promise<void> {
+    if (!this.refreshToken || !this.clientId || !this.clientSecret) return;
+    if (!this.expiresAt) return;
+    if (Date.now() < this.expiresAt - REFRESH_BUFFER_MS) return;
+
+    const res = await fetch(LINEAR_OAUTH_TOKEN_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        Accept: "application/json",
+      },
+      body: new URLSearchParams({
+        grant_type: "refresh_token",
+        client_id: this.clientId,
+        client_secret: this.clientSecret,
+        refresh_token: this.refreshToken,
+      }),
+    });
+
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Linear token refresh failed (${res.status}): ${text}`);
+    }
+
+    const data = await res.json() as {
+      access_token: string;
+      refresh_token?: string;
+      expires_in: number;
+    };
+
+    this.accessToken = data.access_token;
+    if (data.refresh_token) this.refreshToken = data.refresh_token;
+    this.expiresAt = Date.now() + data.expires_in * 1000;
+
+    this.persistToken();
+  }
+
+  /**
+   * Persist refreshed token back to Cyrus config to keep it in sync.
+   */
+  private persistToken(): void {
+    if (this.tokenSource !== "cyrus") return;
+
+    try {
+      const raw = readFileSync(CYRUS_CONFIG_PATH, "utf8");
+      const store = JSON.parse(raw);
+      const workspaces = store?.linearWorkspaces;
+      if (!workspaces) return;
+
+      const firstKey = Object.keys(workspaces)[0];
+      if (!firstKey) return;
+
+      workspaces[firstKey].linearToken = this.accessToken;
+      if (this.refreshToken) {
+        workspaces[firstKey].linearRefreshToken = this.refreshToken;
+      }
+      if (this.expiresAt) {
+        workspaces[firstKey].linearTokenExpiresAt = this.expiresAt;
+      }
+
+      writeFileSync(CYRUS_CONFIG_PATH, JSON.stringify(store, null, 2), "utf8");
+    } catch {
+      // Best-effort persistence
+    }
   }
 
   private authHeader(): string {
@@ -89,6 +175,8 @@ export class LinearAgentApi {
     query: string,
     variables?: Record<string, unknown>,
   ): Promise<T> {
+    await this.ensureValidToken();
+
     const res = await fetch(LINEAR_GRAPHQL_URL, {
       method: "POST",
       headers: {
@@ -97,6 +185,33 @@ export class LinearAgentApi {
       },
       body: JSON.stringify({ query, variables }),
     });
+
+    // On 401, force a refresh and retry once
+    if (res.status === 401 && this.refreshToken) {
+      this.expiresAt = 0; // force refresh
+      await this.ensureValidToken();
+
+      const retry = await fetch(LINEAR_GRAPHQL_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: this.authHeader(),
+        },
+        body: JSON.stringify({ query, variables }),
+      });
+
+      if (!retry.ok) {
+        const text = await retry.text();
+        throw new Error(`Linear API ${retry.status}: ${text}`);
+      }
+
+      const payload = await retry.json();
+      if (payload.errors?.length && !payload.data) {
+        throw new Error(`Linear GraphQL: ${JSON.stringify(payload.errors)}`);
+      }
+
+      return payload.data as T;
+    }
 
     if (!res.ok) {
       const text = await res.text();
