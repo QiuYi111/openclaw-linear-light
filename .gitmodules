@@ -1,0 +1,9 @@
+[submodule "3rdparty/openclaw-linear-plugin"]
+	path = 3rdparty/openclaw-linear-plugin
+	url = https://github.com/calltelemetry/openclaw-linear-plugin.git
+[submodule "3rdparty/cyrus"]
+	path = 3rdparty/cyrus
+	url = https://github.com/ceedaragents/cyrus.git
+[submodule "3rdparty/openclaw"]
+	path = 3rdparty/openclaw
+	url = https://github.com/openclaw/openclaw.git
