@@ -161,26 +161,28 @@ async function onAgentEnd(api: OpenClawPluginApi, event: any) {
   const success = event?.success !== false;
 
   try {
-    if (success && config?.notifyOnComplete !== false) {
-      // Update status to Done
+    if (success) {
+      // Always update status to Done on success
       try {
         await linearApi.updateIssueState(issueId, "Done");
       } catch {
         // Status update is best-effort
       }
 
-      // Send notification via OpenClaw
-      const channel = (config?.notificationChannel as string) || "telegram";
-      const target = config?.notificationTarget as string | undefined;
-      const issue = await linearApi.getIssueDetails(issueId);
+      // Only send notification if enabled
+      if (config?.notifyOnComplete !== false) {
+        const channel = (config?.notificationChannel as string) || "telegram";
+        const target = config?.notificationTarget as string | undefined;
+        const issue = await linearApi.getIssueDetails(issueId);
 
-      const msg = `✅ Linear issue **[${issue.identifier}] ${issue.title}** 已完成，请 review。\n${issue.url}`;
+        const msg = `✅ Linear issue **[${issue.identifier}] ${issue.title}** 已完成，请 review。\n${issue.url}`;
 
-      await api.sendNotification({
-        channel,
-        target,
-        message: msg,
-      });
+        await api.sendNotification({
+          channel,
+          target,
+          message: msg,
+        });
+      }
     }
   } catch (err) {
     api.logger.error(`Linear Light: onAgentEnd failed for ${issueId}: ${err}`);
