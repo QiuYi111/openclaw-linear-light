@@ -136,8 +136,12 @@ export async function handleWebhook(
     return;
   }
 
-  // Dedup
-  const dedupKey = `${body.type}:${body.action}:${body.data?.id || body.createdAt}`;
+  // Dedup — use payload-type-aware ID
+  const eventId =
+    body.agentSession?.id || // AgentSessionEvent
+    body.data?.id || // Comment / Issue
+    body.createdAt;
+  const dedupKey = `${body.type}:${body.action}:${eventId}`;
   if (wasRecentlyProcessed(dedupKey)) {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ ok: true, deduped: true }));
