@@ -1,0 +1,10 @@
+node_modules/
+.env
+*.log
+.cyrus/
+.DS_Store
+._*
+3rdparty/cyrus/
+3rdparty/openclaw-linear-plugin/
+3rdparty/openclaw/
+

@@ -1,0 +1,52 @@
+{
+  "id": "linear-light",
+  "name": "Linear Light",
+  "description": "Lightweight Linear integration — @mention triggers task sessions with status management and notifications",
+  "version": "0.1.0",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "enabled": { "type": "boolean", "default": true },
+      "webhookSecret": {
+        "type": "string",
+        "description": "Linear webhook signing secret",
+        "sensitive": true
+      },
+      "mentionTrigger": {
+        "type": "string",
+        "description": "Text that triggers the agent in comments (default: auto-detect from OAuth app)",
+        "default": "Linus"
+      },
+      "autoInProgress": {
+        "type": "boolean",
+        "description": "Automatically set issue to In Progress when agent starts working",
+        "default": true
+      },
+      "notifyOnComplete": {
+        "type": "boolean",
+        "description": "Send notification when agent finishes (for review)",
+        "default": true
+      },
+      "notificationChannel": {
+        "type": "string",
+        "description": "Channel to send completion notifications to (e.g. telegram)",
+        "default": "telegram"
+      },
+      "notificationTarget": {
+        "type": "string",
+        "description": "Target chat/user ID for notifications"
+      },
+      "sessionPrefix": {
+        "type": "string",
+        "description": "Prefix for session keys",
+        "default": "linear:"
+      },
+      "maxSessionAgeMs": {
+        "type": "number",
+        "description": "Max age for issue sessions before starting fresh (default: 24h)",
+        "default": 86400000
+      }
+    }
+  }
+}
