@@ -37,6 +37,16 @@
         "type": "string",
         "description": "Target chat/user ID for notifications"
       },
+      "linearClientId": {
+        "type": "string",
+        "description": "Linear OAuth client ID (required for token refresh)",
+        "sensitive": true
+      },
+      "linearClientSecret": {
+        "type": "string",
+        "description": "Linear OAuth client secret (required for token refresh)",
+        "sensitive": true
+      },
       "sessionPrefix": {
         "type": "string",
         "description": "Prefix for session keys",

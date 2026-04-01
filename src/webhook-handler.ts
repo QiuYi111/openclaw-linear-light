@@ -19,6 +19,16 @@ const recentlyProcessed = new Map<string, number>();
 const DEDUP_TTL_MS = 60_000;
 let lastSweep = Date.now();
 
+// Concurrent run guard — prevents two webhooks for the same issue from spawning
+// parallel agent sessions (e.g. "created" followed quickly by "prompted").
+const activeRuns = new Set<string>();
+
+export function clearActiveRun(sessionKey: string): void {
+  if (sessionKey.startsWith("linear:")) {
+    activeRuns.delete(sessionKey);
+  }
+}
+
 function wasRecentlyProcessed(key: string): boolean {
   const now = Date.now();
   if (now - lastSweep > 10_000) {
@@ -230,6 +240,13 @@ async function handleSessionCreated(
   const sessionPrefix = (config?.sessionPrefix as string) || "linear:";
   const sessionKey = `${sessionPrefix}${issueId}`;
 
+  // Guard: skip if an agent is already running for this issue
+  if (activeRuns.has(sessionKey)) {
+    api.logger.info(`Linear Light: agent already running for ${issue.identifier}, skipping`);
+    return;
+  }
+  activeRuns.add(sessionKey);
+
   // Determine prompt content
   // If triggered by @mention, use the comment body
   // Otherwise use the issue description
@@ -252,6 +269,9 @@ async function handleSessionCreated(
         const linearApi = new LinearAgentApi(tokenInfo.accessToken, {
           refreshToken: tokenInfo.refreshToken,
           expiresAt: tokenInfo.expiresAt,
+          clientId: (config?.linearClientId as string) || process.env.LINEAR_CLIENT_ID,
+          clientSecret: (config?.linearClientSecret as string) || process.env.LINEAR_CLIENT_SECRET,
+          source: tokenInfo.source,
         });
         await linearApi.updateIssueState(issueId, "In Progress");
         api.logger.info(`Linear Light: ${issue.identifier} → In Progress`);
