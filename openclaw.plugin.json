@@ -41,11 +41,6 @@
         "type": "string",
         "description": "Prefix for session keys",
         "default": "linear:"
-      },
-      "maxSessionAgeMs": {
-        "type": "number",
-        "description": "Max age for issue sessions before starting fresh (default: 24h)",
-        "default": 86400000
       }
     }
   }

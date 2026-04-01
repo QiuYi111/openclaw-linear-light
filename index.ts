@@ -142,15 +142,17 @@ function createLinearTools(api: OpenClawPluginApi, ctx: any) {
 // ---------------------------------------------------------------------------
 
 async function onAgentEnd(api: OpenClawPluginApi, event: any) {
-  const sessionKey = event?.sessionKey as string | undefined;
-  if (!sessionKey?.startsWith("linear:")) return;
-
   const config = api.pluginConfig as Record<string, unknown> | undefined;
+  const sessionPrefix = (config?.sessionPrefix as string) || "linear:";
+
+  const sessionKey = event?.sessionKey as string | undefined;
+  if (!sessionKey?.startsWith(sessionPrefix)) return;
+
   const tokenInfo = resolveLinearToken(config);
   if (!tokenInfo.accessToken) return;
 
-  // Extract issue ID from session key: "linear:{issueId}"
-  const issueId = sessionKey.slice("linear:".length);
+  // Extract issue ID from session key: "{sessionPrefix}{issueId}"
+  const issueId = sessionKey.slice(sessionPrefix.length);
   if (!issueId) return;
 
   const linearApi = new LinearAgentApi(tokenInfo.accessToken, {

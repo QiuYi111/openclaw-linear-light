@@ -223,7 +223,8 @@ async function handleSessionCreated(
   const issue = session.issue;
   const comment = session.comment;
   const issueId = issue.id;
-  const sessionKey = `linear:${issueId}`;
+  const sessionPrefix = (config?.sessionPrefix as string) || "linear:";
+  const sessionKey = `${sessionPrefix}${issueId}`;
 
   // Determine prompt content
   // If triggered by @mention, use the comment body
@@ -303,7 +304,8 @@ async function handleSessionPrompted(
   }
 
   const issueId = session.issue.id;
-  const sessionKey = `linear:${issueId}`;
+  const sessionPrefix = (config?.sessionPrefix as string) || "linear:";
+  const sessionKey = `${sessionPrefix}${issueId}`;
   const prompt = sanitizePromptInput(activity.content.body);
 
   const message = [
