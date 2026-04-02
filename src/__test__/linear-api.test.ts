@@ -127,17 +127,21 @@ describe("LinearAgentApi", () => {
       warnSpy.mockRestore()
     })
 
-    it("throws on HTTP error", async () => {
+    it("throws on HTTP error with sanitized message", async () => {
       const { LinearAgentApi } = await import("../api/linear-api.js")
       const api = new LinearAgentApi("lin_api_test")
 
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {})
       mockFetch.mockResolvedValue({
         ok: false,
         status: 500,
-        text: () => Promise.resolve("Internal Server Error"),
+        text: () => Promise.resolve("Internal Server Error with secret info"),
       })
 
-      await expect(api.getTeams()).rejects.toThrow("Linear API 500")
+      await expect(api.getTeams()).rejects.toThrow("Linear API request failed (500)")
+      // Full response body must be logged server-side, not exposed in thrown message
+      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("secret info"))
+      errorSpy.mockRestore()
     })
   })
 
