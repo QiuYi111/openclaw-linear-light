@@ -108,7 +108,7 @@ export class LinearAgentApi {
     this.clientId = opts?.clientId
     this.clientSecret = opts?.clientSecret
     this.tokenSource = opts?.source
-    this.logger = opts?.logger ?? console as unknown as Logger
+    this.logger = opts?.logger ?? (console as unknown as Logger)
   }
 
   /**
