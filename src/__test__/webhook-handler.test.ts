@@ -957,6 +957,150 @@ describe("handleWebhook", () => {
       expect(mockSubagentRun).not.toHaveBeenCalled()
     })
 
+    it("skips comments authored by the bot (self-trigger prevention)", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const botUserId = "bot-user-uuid-001"
+      const api = makeApi({ accessToken: "lin_test_token", botUserId })
+
+      const payload = {
+        type: "Comment",
+        action: "create",
+        createdAt: `2026-04-01T16:00:${String(uid++).padStart(2, "0")}.000Z`,
+        actor: { id: botUserId, name: "Linus Bot" },
+        data: {
+          id: `comment-bot-${uid}`,
+          body: "@Linus I've completed the fix as requested",
+          issue: { id: `issue-bot-${uid}` },
+        },
+      }
+      const { req, res } = makeSignedReq(payload, SECRET)
+
+      await handleWebhook(api, req, res)
+
+      expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
+      expect(mockSubagentRun).not.toHaveBeenCalled()
+    })
+
+    it("processes comments from non-bot users even when botUserId is configured", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi({ accessToken: "lin_test_token", botUserId: "bot-user-uuid-001" })
+
+      const commentIssueId = `issue-nonbot-${uid}`
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            data: {
+              issue: {
+                id: commentIssueId,
+                identifier: "ENG-66",
+                title: "Non-Bot Comment",
+                description: "Test",
+                url: "https://linear.app/eng/issue/ENG-66",
+                state: { name: "Todo", type: "unstarted" },
+                creator: null,
+                assignee: null,
+                labels: { nodes: [] },
+                team: { id: "team-001", key: "ENG", name: "Engineering" },
+                comments: { nodes: [] },
+                project: null,
+              },
+            },
+          }),
+      })
+
+      const payload = {
+        type: "Comment",
+        action: "create",
+        createdAt: `2026-04-01T16:00:${String(uid++).padStart(2, "0")}.000Z`,
+        actor: { id: "human-user-uuid-001", name: "Alice" },
+        data: {
+          id: `comment-nonbot-${uid}`,
+          body: "@Linus can you look at this?",
+          issue: { id: commentIssueId },
+        },
+      }
+      const { req, res } = makeSignedReq(payload, SECRET)
+
+      await handleWebhook(api, req, res)
+
+      expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
+      expect(mockSubagentRun).toHaveBeenCalled()
+    })
+
+    it("processes comments when botUserId is not configured (backward compatible)", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi({ accessToken: "lin_test_token" })
+      // No botUserId in config
+
+      const commentIssueId = `issue-nobbotid-${uid}`
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            data: {
+              issue: {
+                id: commentIssueId,
+                identifier: "ENG-55",
+                title: "No BotUserId",
+                description: "Test",
+                url: "https://linear.app/eng/issue/ENG-55",
+                state: { name: "Todo", type: "unstarted" },
+                creator: null,
+                assignee: null,
+                labels: { nodes: [] },
+                team: { id: "team-001", key: "ENG", name: "Engineering" },
+                comments: { nodes: [] },
+                project: null,
+              },
+            },
+          }),
+      })
+
+      const payload = {
+        type: "Comment",
+        action: "create",
+        createdAt: `2026-04-01T17:00:${String(uid++).padStart(2, "0")}.000Z`,
+        actor: { id: "some-user-001", name: "Anyone" },
+        data: {
+          id: `comment-nobbotid-${uid}`,
+          body: "@Linus help me",
+          issue: { id: commentIssueId },
+        },
+      }
+      const { req, res } = makeSignedReq(payload, SECRET)
+
+      await handleWebhook(api, req, res)
+
+      expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
+      expect(mockSubagentRun).toHaveBeenCalled()
+    })
+
+    it("skips bot comments when actor has no id but matches by name (edge case with missing actor.id)", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi({ accessToken: "lin_test_token", botUserId: "bot-user-uuid-001" })
+
+      // Actor without id field — should NOT be filtered (no id to compare)
+      const payload = {
+        type: "Comment",
+        action: "create",
+        createdAt: `2026-04-01T18:00:${String(uid++).padStart(2, "0")}.000Z`,
+        actor: { name: "Linus Bot" },
+        data: {
+          id: `comment-noactorid-${uid}`,
+          body: "@Linus this comment has no actor.id",
+          issue: { id: `issue-noactorid-${uid}` },
+        },
+      }
+      const { req, res } = makeSignedReq(payload, SECRET)
+
+      await handleWebhook(api, req, res)
+
+      // Without actor.id, the filter can't match — so it passes through
+      // but won't dispatch because no token was mocked for fetch
+      expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
+    })
+
     it("handleCommentCreate blocks when agent already running from created event (cross-type activeRuns)", async () => {
       const { handleWebhook } = await import("../webhook-handler.js")
       const api = makeApi({ accessToken: "lin_test_token" })

@@ -414,6 +414,17 @@ async function handleCommentCreate(
     return
   }
 
+  // Skip comments authored by the bot itself to prevent self-triggering loops.
+  // Linear webhooks include an `actor` field identifying who triggered the event.
+  const botUserId = (config?.botUserId as string) || process.env.LINEAR_BOT_USER_ID
+  if (botUserId) {
+    const actorId = payload.actor?.id as string | undefined
+    if (actorId && actorId === botUserId) {
+      api.logger.debug?.(`Linear Light: skipping bot-authored comment (actor=${actorId})`)
+      return
+    }
+  }
+
   const issueId = comment.issue.id
   const sessionPrefix = (config?.sessionPrefix as string) || "linear:"
   const sessionKey = `${sessionPrefix}${issueId}`
