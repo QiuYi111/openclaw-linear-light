@@ -1076,7 +1076,11 @@ describe("handleWebhook", () => {
         createdAt: `2099-12-02T00:01:${String(n2).padStart(2, "0")}.000Z`,
         agentSession: {
           id: `sess-cross2-${n2}`,
-          issue: { id: crossIssueId, identifier: `ENG-${n2 + 200}`, url: `https://linear.app/eng/issue/ENG-${n2 + 200}` },
+          issue: {
+            id: crossIssueId,
+            identifier: `ENG-${n2 + 200}`,
+            url: `https://linear.app/eng/issue/ENG-${n2 + 200}`,
+          },
         },
         agentActivity: { content: { body: "Follow-up after comment" }, signal: null },
       })
