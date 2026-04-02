@@ -200,7 +200,8 @@ export class LinearAgentApi {
 
       if (!retry.ok) {
         const text = await retry.text()
-        throw new Error(`Linear API ${retry.status}: ${text}`)
+        console.error(`Linear API ${retry.status}: ${text}`)
+        throw new Error(`Linear API request failed (${retry.status})`)
       }
 
       const payload = await retry.json()
@@ -217,7 +218,8 @@ export class LinearAgentApi {
 
     if (!res.ok) {
       const text = await res.text()
-      throw new Error(`Linear API ${res.status}: ${text}`)
+      console.error(`Linear API ${res.status}: ${text}`)
+      throw new Error(`Linear API request failed (${res.status})`)
     }
 
     const payload = await res.json()
