@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 const mockFetch = vi.fn()
 vi.stubGlobal("fetch", mockFetch)
 
-// Mock fs for resolveLinearToken
+// Mock fs for resolveLinearToken and persistToCyrusConfig
 const mockReadFileSync = vi.fn()
 const mockWriteFileSync = vi.fn()
 const mockRenameSync = vi.fn()
@@ -16,6 +16,12 @@ vi.mock("node:fs", () => ({
   readFileSync: mockReadFileSync,
   writeFileSync: mockWriteFileSync,
   renameSync: mockRenameSync,
+}))
+
+// Mock oauth-store — return null by default (no stored token)
+vi.mock("../api/oauth-store.js", () => ({
+  readStoredToken: vi.fn(() => null),
+  writeStoredToken: vi.fn(),
 }))
 
 describe("LinearAgentApi", () => {
@@ -214,6 +220,49 @@ describe("LinearAgentApi", () => {
       // Only API call, no refresh
       expect(mockFetch).toHaveBeenCalledTimes(1)
     })
+
+    it("coalesces concurrent refresh requests", async () => {
+      const { LinearAgentApi } = await import("../api/linear-api.js")
+
+      // Create two API instances with the same clientId (same refresh key)
+      const api1 = new LinearAgentApi("lin_oauth_test", {
+        refreshToken: "refresh-123",
+        clientId: "same-client",
+        clientSecret: "csec",
+        expiresAt: Date.now() - 1000,
+      })
+      const api2 = new LinearAgentApi("lin_oauth_test", {
+        refreshToken: "refresh-123",
+        clientId: "same-client",
+        clientSecret: "csec",
+        expiresAt: Date.now() - 1000,
+      })
+
+      // Refresh call — only one should hit the token endpoint
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            access_token: "new_token",
+            refresh_token: "new_refresh",
+            expires_in: 3600,
+          }),
+      })
+
+      // Two API calls that both need refresh
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ data: { teams: { nodes: [] } } }),
+      })
+
+      // Run both concurrently — only one refresh should happen
+      const [, _result2] = await Promise.all([api1.getTeams(), api2.getTeams()])
+
+      // Should have 1 refresh + 2 API calls = 3 fetch calls total
+      expect(mockFetch).toHaveBeenCalledTimes(3)
+      // First call should be the refresh
+      expect(mockFetch.mock.calls[0][0]).toBe("https://api.linear.app/oauth/token")
+    })
   })
 
   describe("401 retry", () => {
@@ -276,9 +325,10 @@ describe("LinearAgentApi", () => {
     })
   })
 
-  describe("persistToken (cyrus source)", () => {
-    it("writes refreshed token back to cyrus config", async () => {
+  describe("persistToken (store + cyrus source)", () => {
+    it("writes refreshed token to plugin-local store and cyrus config", async () => {
       const { LinearAgentApi } = await import("../api/linear-api.js")
+      const { writeStoredToken } = await import("../api/oauth-store.js")
 
       mockReadFileSync.mockReturnValue(
         JSON.stringify({
@@ -318,7 +368,15 @@ describe("LinearAgentApi", () => {
 
       await api.getTeams()
 
-      // writeFileSync should write to a temp file, then renameSync for atomicity
+      // Should write to plugin-local store
+      expect(writeStoredToken).toHaveBeenCalledWith(
+        expect.objectContaining({
+          accessToken: "new-access-token",
+          refreshToken: "new-refresh-token",
+        }),
+      )
+
+      // Should also write to Cyrus config
       expect(mockWriteFileSync).toHaveBeenCalled()
       const writtenPath = mockWriteFileSync.mock.calls[0][0]
       expect(writtenPath).toMatch(/\.tmp$/)
@@ -326,7 +384,6 @@ describe("LinearAgentApi", () => {
       const ws = written.linearWorkspaces.default
       expect(ws.linearToken).toBe("new-access-token")
       expect(ws.linearRefreshToken).toBe("new-refresh-token")
-      // rename from temp → final path for atomic persistence
       expect(mockRenameSync).toHaveBeenCalledWith(writtenPath, expect.stringMatching(/config\.json$/))
     })
   })
@@ -369,7 +426,27 @@ describe("LinearAgentApi", () => {
       expect(result).toEqual({ accessToken: "cfg-token-123", source: "config" })
     })
 
-    it("returns token from Cyrus config", async () => {
+    it("returns token from plugin-local store", async () => {
+      const { readStoredToken } = await import("../api/oauth-store.js")
+      vi.mocked(readStoredToken).mockReturnValue({
+        accessToken: "stored-token",
+        refreshToken: "stored-refresh",
+        expiresAt: 1234567890,
+      })
+
+      const { resolveLinearToken } = await import("../api/linear-api.js")
+      const result = resolveLinearToken()
+      expect(result.accessToken).toBe("stored-token")
+      expect(result.source).toBe("store")
+      expect(result.refreshToken).toBe("stored-refresh")
+
+      vi.mocked(readStoredToken).mockReturnValue(null)
+    })
+
+    it("returns token from Cyrus config when store is empty", async () => {
+      const { readStoredToken } = await import("../api/oauth-store.js")
+      vi.mocked(readStoredToken).mockReturnValue(null)
+
       const { resolveLinearToken } = await import("../api/linear-api.js")
       mockReadFileSync.mockReturnValue(
         JSON.stringify({
@@ -390,6 +467,9 @@ describe("LinearAgentApi", () => {
     })
 
     it("returns token from env var as fallback", async () => {
+      const { readStoredToken } = await import("../api/oauth-store.js")
+      vi.mocked(readStoredToken).mockReturnValue(null)
+
       const { resolveLinearToken } = await import("../api/linear-api.js")
       mockReadFileSync.mockImplementation(() => {
         throw new Error("no file")
@@ -401,6 +481,9 @@ describe("LinearAgentApi", () => {
     })
 
     it("returns none when no token available", async () => {
+      const { readStoredToken } = await import("../api/oauth-store.js")
+      vi.mocked(readStoredToken).mockReturnValue(null)
+
       const { resolveLinearToken } = await import("../api/linear-api.js")
       mockReadFileSync.mockImplementation(() => {
         throw new Error("no file")
