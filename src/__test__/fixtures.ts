@@ -51,20 +51,6 @@ export function makeAgentSessionPrompted(overrides?: Record<string, unknown>) {
   }
 }
 
-export function makeCommentCreate(overrides?: Record<string, unknown>) {
-  return {
-    type: "Comment",
-    action: "create",
-    createdAt: "2026-04-01T12:01:00.000Z",
-    data: {
-      id: "comment-001",
-      body: "@Linus please help",
-      issue: { id: "issue-uuid-001" },
-    },
-    ...overrides,
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Linear API response factories
 // ---------------------------------------------------------------------------
@@ -100,80 +86,6 @@ export function makeTeamStates() {
       },
     },
   }
-}
-
-// ---------------------------------------------------------------------------
-// Mock OpenClaw Plugin API
-// ---------------------------------------------------------------------------
-
-export function makeMockApi(overrides?: Record<string, unknown>) {
-  const mockLogger = {
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-  }
-
-  const mockRunAgent = vi.fn().mockResolvedValue(undefined)
-  const mockSendNotification = vi.fn().mockResolvedValue(undefined)
-  const mockRegisterHttpRoute = vi.fn()
-  const mockRegisterTool = vi.fn()
-  const mockRegisterHook = vi.fn()
-
-  return {
-    pluginConfig: {
-      enabled: true,
-      webhookSecret: "test-webhook-secret",
-      mentionTrigger: "Linus",
-      autoInProgress: true,
-      notifyOnComplete: true,
-      notificationChannel: "telegram",
-      notificationTarget: "123456",
-      linearClientId: "test-client-id",
-      linearClientSecret: "test-client-secret",
-    } as Record<string, unknown>,
-    logger: mockLogger,
-    registerHttpRoute: mockRegisterHttpRoute,
-    registerTool: mockRegisterTool,
-    registerHook: mockRegisterHook,
-    runAgent: mockRunAgent,
-    sendNotification: mockSendNotification,
-    ...overrides,
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Mock HTTP req/res for webhook handler tests
-// ---------------------------------------------------------------------------
-
-export function makeMockReqRes(body: string, headers: Record<string, string> = {}) {
-  const chunks: Buffer[] = [Buffer.from(body)]
-  const res = {
-    _statusCode: 0,
-    _headers: {} as Record<string, string>,
-    _body: "",
-    writeHead: vi.fn((code: number, headers?: Record<string, string>) => {
-      res._statusCode = code
-      if (headers) Object.assign(res._headers, headers)
-    }),
-    end: vi.fn((data?: string) => {
-      if (data) res._body = data
-    }),
-  }
-
-  const req = {
-    headers: { "linear-signature": "test-sig", ...headers },
-    on: vi.fn((event: string, cb: (...args: any[]) => void) => {
-      if (event === "data") {
-        for (const chunk of chunks) cb(chunk)
-      }
-      if (event === "end") {
-        cb()
-      }
-    }),
-  }
-
-  return { req, res }
 }
 
 // ---------------------------------------------------------------------------

@@ -14,7 +14,7 @@
 
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk"
 import { LinearAgentApi, resolveLinearToken } from "./src/api/linear-api.js"
-import { clearActiveRun, handleWebhook } from "./src/webhook-handler.js"
+import { agentSessionMap, clearActiveRun, handleWebhook } from "./src/webhook-handler.js"
 
 export default function register(api: OpenClawPluginApi) {
   const config = api.pluginConfig as Record<string, unknown> | undefined
@@ -90,12 +90,32 @@ function createLinearTools(api: OpenClawPluginApi): any[] {
         required: ["issueId", "body"],
       },
       execute: async (_toolCallId: string, { issueId, body }: { issueId: string; body: string }) => {
+        const agentSessionId = agentSessionMap.get(issueId)
         try {
           await linearApi.createComment(issueId, body)
+
+          // Emit response activity so Linear shows progress
+          if (agentSessionId) {
+            try {
+              await linearApi.emitActivity(agentSessionId, { type: "response", body })
+            } catch (activityErr) {
+              api.logger.warn(`Linear Light: failed to emit activity: ${activityErr}`)
+            }
+          }
+
           return { content: [{ type: "text", text: `Comment posted on issue ${issueId}` }], details: {} }
         } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+
+          // Emit error activity
+          if (agentSessionId) {
+            try {
+              await linearApi.emitActivity(agentSessionId, { type: "error", body: `Failed to comment: ${msg}` })
+            } catch {}
+          }
+
           return {
-            content: [{ type: "text", text: `Failed to comment: ${err instanceof Error ? err.message : String(err)}` }],
+            content: [{ type: "text", text: `Failed to comment: ${msg}` }],
             details: { status: "failed" },
           }
         }
@@ -177,7 +197,7 @@ async function onSubagentEnded(api: OpenClawPluginApi, event: any): Promise<void
   if (!issueId) return
 
   // Clear the active run guard
-  clearActiveRun(sessionKey)
+  clearActiveRun(sessionKey, sessionPrefix)
 
   const linearApi = new LinearAgentApi(tokenInfo.accessToken, {
     refreshToken: tokenInfo.refreshToken,
@@ -188,6 +208,16 @@ async function onSubagentEnded(api: OpenClawPluginApi, event: any): Promise<void
   })
 
   const success = event?.success !== false
+
+  // Emit error activity if session failed
+  if (!success) {
+    const agentSessionId = agentSessionMap.get(issueId)
+    if (agentSessionId) {
+      try {
+        await linearApi.emitActivity(agentSessionId, { type: "error", body: "Agent session failed" })
+      } catch {}
+    }
+  }
 
   try {
     if (success) {
@@ -218,5 +248,7 @@ async function onSubagentEnded(api: OpenClawPluginApi, event: any): Promise<void
     }
   } catch (err) {
     api.logger.error(`Linear Light: onSubagentEnded failed for ${issueId}: ${err}`)
+  } finally {
+    agentSessionMap.delete(issueId)
   }
 }

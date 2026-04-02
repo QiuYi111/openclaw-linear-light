@@ -16,6 +16,9 @@ import { sanitizePromptInput } from "./utils.js"
 
 // Dedup tracking
 const recentlyProcessed = new Map<string, number>()
+
+// Maps issueId → Linear agent session ID, so tools can emit activity updates
+export const agentSessionMap = new Map<string, string>()
 const DEDUP_TTL_MS = 60_000
 let lastSweep = Date.now()
 
@@ -23,8 +26,8 @@ let lastSweep = Date.now()
 // parallel agent sessions (e.g. "created" followed quickly by "prompted").
 const activeRuns = new Set<string>()
 
-export function clearActiveRun(sessionKey: string): void {
-  if (sessionKey.startsWith("linear:")) {
+export function clearActiveRun(sessionKey: string, prefix = "linear:"): void {
+  if (sessionKey.startsWith(prefix)) {
     activeRuns.delete(sessionKey)
   }
 }
@@ -251,34 +254,42 @@ async function handleSessionCreated(
   const isMentionTriggered = commentBody && !commentBody.includes(AGENT_SESSION_MARKER)
   const prompt = isMentionTriggered ? commentBody : issue.description || issue.title
 
+  // Store agent session ID for activity emission
+  const agentSessionId = session.id as string | undefined
+  if (agentSessionId) {
+    agentSessionMap.set(issueId, agentSessionId)
+  }
+
   api.logger.info(`Linear Light: session created for ${issue.identifier} (${isMentionTriggered ? "mention" : "auto"})`)
 
+  // Resolve Linear API for status update and activity emission
+  const tokenInfo = resolveLinearToken(config)
+
   // Update issue status to In Progress
-  if (config?.autoInProgress !== false) {
+  if (config?.autoInProgress !== false && tokenInfo.accessToken) {
     try {
-      const tokenInfo = resolveLinearToken(config)
-      if (tokenInfo.accessToken) {
-        const linearApi = new LinearAgentApi(tokenInfo.accessToken, {
-          refreshToken: tokenInfo.refreshToken,
-          expiresAt: tokenInfo.expiresAt,
-          clientId: (config?.linearClientId as string) || process.env.LINEAR_CLIENT_ID,
-          clientSecret: (config?.linearClientSecret as string) || process.env.LINEAR_CLIENT_SECRET,
-          source: tokenInfo.source,
-        })
-        await linearApi.updateIssueState(issueId, "In Progress")
-        api.logger.info(`Linear Light: ${issue.identifier} → In Progress`)
-      }
+      const linearApi = new LinearAgentApi(tokenInfo.accessToken, {
+        refreshToken: tokenInfo.refreshToken,
+        expiresAt: tokenInfo.expiresAt,
+        clientId: (config?.linearClientId as string) || process.env.LINEAR_CLIENT_ID,
+        clientSecret: (config?.linearClientSecret as string) || process.env.LINEAR_CLIENT_SECRET,
+        source: tokenInfo.source,
+      })
+      await linearApi.updateIssueState(issueId, "In Progress")
+      api.logger.info(`Linear Light: ${issue.identifier} → In Progress`)
     } catch (err) {
       api.logger.warn(`Linear Light: failed to update status: ${err}`)
     }
   }
 
   // Build the message for the agent
+  const safeTitle = sanitizePromptInput(issue.title, 200)
+  const safeDescription = issue.description ? sanitizePromptInput(issue.description) : ""
   const sanitizedPrompt = sanitizePromptInput(prompt)
 
   const message = [
-    `[Linear Issue ${issue.identifier}] ${issue.title}`,
-    issue.description ? `\n---\n${issue.description}` : "",
+    `[Linear Issue ${issue.identifier}] ${safeTitle}`,
+    safeDescription ? `\n---\n${safeDescription}` : "",
     isMentionTriggered ? `\n---\n**User comment:**\n${sanitizedPrompt}` : "",
     `\n---\nIssue URL: ${issue.url}`,
     `\nUse linear_comment() to reply on the issue, linear_update_status() to change status.`,
@@ -290,6 +301,25 @@ async function handleSessionCreated(
     message,
     sessionKey,
   })
+
+  // Emit initial activity so Linear shows the session as active
+  if (agentSessionId && tokenInfo.accessToken) {
+    try {
+      const linearApi = new LinearAgentApi(tokenInfo.accessToken, {
+        refreshToken: tokenInfo.refreshToken,
+        expiresAt: tokenInfo.expiresAt,
+        clientId: (config?.linearClientId as string) || process.env.LINEAR_CLIENT_ID,
+        clientSecret: (config?.linearClientSecret as string) || process.env.LINEAR_CLIENT_SECRET,
+        source: tokenInfo.source,
+      })
+      await linearApi.emitActivity(agentSessionId, {
+        type: "thought",
+        body: `Starting work on ${issue.identifier}: ${issue.title}`,
+      })
+    } catch (err) {
+      api.logger.warn(`Linear Light: failed to emit initial activity: ${err}`)
+    }
+  }
 
   api.logger.info(`Linear Light: dispatched agent for ${issue.identifier}`)
 }
@@ -318,6 +348,13 @@ async function handleSessionPrompted(
   const issueId = session.issue.id
   const sessionPrefix = (config?.sessionPrefix as string) || "linear:"
   const sessionKey = `${sessionPrefix}${issueId}`
+
+  // Ensure agent session ID is available for activity emission
+  const agentSessionId = session.id as string | undefined
+  if (agentSessionId) {
+    agentSessionMap.set(issueId, agentSessionId)
+  }
+
   const prompt = sanitizePromptInput(activity.content.body)
 
   const message = [`[Linear ${session.issue.identifier} follow-up]`, prompt].join("\n")
@@ -331,8 +368,10 @@ async function handleSessionPrompted(
 }
 
 /**
- * Handle comment create events (fallback for non-agent-session setups)
- * If the comment contains the trigger text, treat it as a request
+ * Handle comment create events (fallback for non-agent-session setups).
+ * If the comment contains the trigger text, treat it as a request.
+ * This path is used when Linear Agent Sessions are not available —
+ * the webhook receives Comment events directly instead of AgentSessionEvent.
  */
 async function handleCommentCreate(
   api: OpenClawPluginApi,
@@ -349,9 +388,64 @@ async function handleCommentCreate(
     return
   }
 
-  // Already handled by AgentSessionEvent if agent sessions are enabled
-  // This is a fallback path
-  api.logger.debug?.(
-    `Linear Light: comment trigger detected (fallback path), skipping — AgentSessionEvent should handle this`,
-  )
+  const issueId = comment.issue.id
+  const sessionPrefix = (config?.sessionPrefix as string) || "linear:"
+  const sessionKey = `${sessionPrefix}${issueId}`
+
+  api.logger.info(`Linear Light: comment trigger detected (fallback path) for issue ${issueId}`)
+
+  // Resolve Linear API to fetch full issue details and update status
+  const tokenInfo = resolveLinearToken(config)
+  if (!tokenInfo.accessToken) {
+    api.logger.warn("Linear Light: comment fallback triggered but no Linear API token available")
+    return
+  }
+
+  const linearApi = new LinearAgentApi(tokenInfo.accessToken, {
+    refreshToken: tokenInfo.refreshToken,
+    expiresAt: tokenInfo.expiresAt,
+    clientId: (config?.linearClientId as string) || process.env.LINEAR_CLIENT_ID,
+    clientSecret: (config?.linearClientSecret as string) || process.env.LINEAR_CLIENT_SECRET,
+    source: tokenInfo.source,
+  })
+
+  let issue: Awaited<ReturnType<LinearAgentApi["getIssueDetails"]>>
+  try {
+    issue = await linearApi.getIssueDetails(issueId)
+  } catch (err) {
+    api.logger.error(`Linear Light: failed to fetch issue ${issueId}: ${err}`)
+    return
+  }
+
+  // Update issue status to In Progress
+  if (config?.autoInProgress !== false) {
+    try {
+      await linearApi.updateIssueState(issueId, "In Progress")
+      api.logger.info(`Linear Light: ${issue.identifier} → In Progress`)
+    } catch (err) {
+      api.logger.warn(`Linear Light: failed to update status: ${err}`)
+    }
+  }
+
+  // Build the message for the agent
+  const sanitizedPrompt = sanitizePromptInput(comment.body)
+  const safeTitle = sanitizePromptInput(issue.title, 200)
+  const safeDescription = issue.description ? sanitizePromptInput(issue.description) : ""
+
+  const message = [
+    `[Linear Issue ${issue.identifier}] ${safeTitle}`,
+    safeDescription ? `\n---\n${safeDescription}` : "",
+    `\n---\n**User comment:**\n${sanitizedPrompt}`,
+    `\n---\nIssue URL: ${issue.url}`,
+    `\nUse linear_comment() to reply on the issue, linear_update_status() to change status.`,
+    `\nWhen done, update status to "Done" and I'll notify the user for review.`,
+  ].join("\n")
+
+  // Dispatch to OpenClaw agent with session key for continuity
+  await api.runtime.subagent.run({
+    message,
+    sessionKey,
+  })
+
+  api.logger.info(`Linear Light: dispatched agent for ${issue.identifier} (comment fallback)`)
 }

@@ -78,6 +78,7 @@ describe("LinearAgentApi", () => {
       const { LinearAgentApi } = await import("../api/linear-api.js")
       const api = new LinearAgentApi("lin_api_test")
 
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {})
       mockFetch.mockResolvedValue({
         ok: true,
         json: () =>
@@ -87,9 +88,11 @@ describe("LinearAgentApi", () => {
           }),
       })
 
-      // Current behavior: returns data when errors AND data are both present
       const result = await api.getTeams()
       expect(result).toHaveLength(1)
+      // Partial errors should be logged as warnings
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("partial errors"))
+      warnSpy.mockRestore()
     })
 
     it("throws on HTTP error", async () => {
