@@ -66,9 +66,9 @@ function wasRecentlyProcessed(key: string): boolean {
  * Linear uses HMAC-SHA256 with the webhook signing secret.
  */
 function verifySignature(rawBody: Buffer, signature: string, secret: string): boolean {
-  const expected = createHmac("sha256", secret).update(rawBody).digest("base64")
+  const expected = createHmac("sha256", secret).update(rawBody).digest("hex")
   try {
-    return timingSafeEqual(Buffer.from(signature, "base64"), Buffer.from(expected, "base64"))
+    return timingSafeEqual(Buffer.from(signature, "utf8"), Buffer.from(expected, "utf8"))
   } catch {
     return false
   }
@@ -130,7 +130,7 @@ async function readBody(
  */
 export async function handleWebhook(api: OpenClawPluginApi, req: any, res: any): Promise<void> {
   const config = api.pluginConfig as Record<string, unknown> | undefined
-  const secret = (config?.webhookSecret as string) || process.env.LINEAR_WEBHOOK_SECRET
+  const secret = config?.webhookSecret as string | undefined
 
   if (!secret) {
     api.logger.error("Linear Light: no webhook secret configured")

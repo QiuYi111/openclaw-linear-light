@@ -20,7 +20,7 @@ import { agentSessionMap, clearActiveRun, handleWebhook } from "./src/webhook-ha
 export default function register(api: OpenClawPluginApi) {
   const config = api.pluginConfig as Record<string, unknown> | undefined
 
-  if (!config?.enabled) {
+  if (config?.enabled === false) {
     api.logger.info("Linear Light: disabled by config")
     return
   }

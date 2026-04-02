@@ -14,7 +14,7 @@ import { writeStoredToken } from "./api/oauth-store.js"
 
 const LINEAR_AUTHORIZE_URL = "https://linear.app/oauth/authorize"
 const LINEAR_TOKEN_URL = "https://api.linear.app/oauth/token"
-const DEFAULT_SCOPES = "read,write"
+const DEFAULT_SCOPES = "read,write,app:mentionable,app:assignable"
 
 const STATE_TTL_MS = 600_000 // 10 minutes
 
