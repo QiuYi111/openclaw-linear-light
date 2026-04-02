@@ -234,6 +234,13 @@ async function handleSessionCreated(
   }
 
   const issue = session.issue
+
+  // Validate required issue fields — malformed payload would crash downstream
+  if (!(issue.id && issue.title && issue.identifier)) {
+    api.logger.warn("Linear Light: malformed session payload — missing issue.id/title/identifier")
+    return
+  }
+
   const comment = session.comment
   const issueId = issue.id
   const sessionPrefix = (config?.sessionPrefix as string) || "linear:"
@@ -349,6 +356,12 @@ async function handleSessionPrompted(
   const activity = payload.agentActivity
 
   if (!(session?.issue && activity?.content?.body)) {
+    return
+  }
+
+  // Validate required fields — malformed payload would crash downstream
+  if (!(session.issue.id && session.issue.identifier)) {
+    api.logger.warn("Linear Light: malformed prompted payload — missing issue.id/identifier")
     return
   }
 
