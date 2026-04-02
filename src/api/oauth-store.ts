@@ -40,11 +40,11 @@ export function readStoredToken(): StoredToken | null {
 export function writeStoredToken(token: StoredToken): void {
   try {
     if (!existsSync(TOKEN_DIR)) {
-      mkdirSync(TOKEN_DIR, { recursive: true })
+      mkdirSync(TOKEN_DIR, { recursive: true, mode: 0o700 })
     }
 
     const tmpPath = `${TOKEN_PATH}.tmp`
-    writeFileSync(tmpPath, JSON.stringify(token, null, 2), "utf8")
+    writeFileSync(tmpPath, JSON.stringify(token, null, 2), { encoding: "utf8", mode: 0o600 })
     renameSync(tmpPath, TOKEN_PATH)
   } catch (err) {
     console.error(`Linear Light: failed to write token store: ${err}`)
