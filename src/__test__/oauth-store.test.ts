@@ -91,15 +91,13 @@ describe("oauth-store", () => {
         throw new Error("permission denied")
       })
 
-      // Suppress console.error for this test
-      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {})
+      const mockLogger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 
       const { writeStoredToken } = await import("../api/oauth-store.js")
 
       // Should not throw
-      expect(() => writeStoredToken({ accessToken: "at" })).not.toThrow()
-      expect(errorSpy).toHaveBeenCalled()
-      errorSpy.mockRestore()
+      expect(() => writeStoredToken({ accessToken: "at" }, mockLogger)).not.toThrow()
+      expect(mockLogger.error).toHaveBeenCalledWith(expect.stringContaining("failed to write token store"))
     })
   })
 })

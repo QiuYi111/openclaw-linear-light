@@ -9,6 +9,16 @@ import { readFileSync, renameSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
 
+/**
+ * Minimal logger interface matching OpenClaw's api.logger shape.
+ */
+export interface Logger {
+  info(msg: string): void
+  warn(msg: string): void
+  error(msg: string): void
+  debug?(msg: string): void
+}
+
 const LINEAR_GRAPHQL_URL = "https://api.linear.app/graphql"
 const LINEAR_OAUTH_TOKEN_URL = "https://api.linear.app/oauth/token"
 const CYRUS_CONFIG_PATH = join(homedir(), ".cyrus", "config.json")
@@ -77,6 +87,7 @@ export class LinearAgentApi {
   private clientId?: string
   private clientSecret?: string
   private tokenSource?: string
+  private logger: Logger
   private refreshPromise: Promise<void> | null = null
   private refreshSuccessTime: number = 0
 
@@ -88,6 +99,7 @@ export class LinearAgentApi {
       clientId?: string
       clientSecret?: string
       source?: string
+      logger?: Logger
     },
   ) {
     this.accessToken = accessToken
@@ -96,6 +108,7 @@ export class LinearAgentApi {
     this.clientId = opts?.clientId
     this.clientSecret = opts?.clientSecret
     this.tokenSource = opts?.source
+    this.logger = opts?.logger ?? console as unknown as Logger
   }
 
   /**
@@ -202,6 +215,16 @@ export class LinearAgentApi {
     }
   }
 
+  /**
+   * Strip token-like values and workspace secrets from log output.
+   */
+  private sanitize(text: string): string {
+    // Remove Bearer tokens and long hex/base64 strings that look like tokens
+    return text
+      .replace(/Bearer\s+\S+/g, "Bearer [redacted]")
+      .replace(/(?:access_token|refresh_token|token|secret|apiKey|api_key)["\s:=]+[^\s"',}]{20,}/gi, "$1=[redacted]")
+  }
+
   private authHeader(): string {
     // OAuth tokens require Bearer prefix; personal API keys do not
     return this.refreshToken ? `Bearer ${this.accessToken}` : this.accessToken
@@ -235,17 +258,17 @@ export class LinearAgentApi {
 
       if (!retry.ok) {
         const text = await retry.text()
-        console.error(`Linear API ${retry.status}: ${text}`)
+        this.logger.error(`Linear API ${retry.status} (after refresh): ${this.sanitize(text)}`)
         throw new Error(`Linear API request failed (${retry.status})`)
       }
 
       const payload = await retry.json()
       if (payload.errors?.length) {
         if (!payload.data) {
-          console.error(`Linear GraphQL errors: ${JSON.stringify(payload.errors)}`)
+          this.logger.error(`Linear GraphQL errors (after refresh): ${JSON.stringify(payload.errors)}`)
           throw new Error("Linear GraphQL request failed (see server logs)")
         }
-        console.warn(`Linear GraphQL partial errors: ${JSON.stringify(payload.errors)}`)
+        this.logger.warn(`Linear GraphQL partial errors (after refresh): ${JSON.stringify(payload.errors)}`)
       }
 
       return payload.data as T
@@ -253,17 +276,17 @@ export class LinearAgentApi {
 
     if (!res.ok) {
       const text = await res.text()
-      console.error(`Linear API ${res.status}: ${text}`)
+      this.logger.error(`Linear API ${res.status}: ${this.sanitize(text)}`)
       throw new Error(`Linear API request failed (${res.status})`)
     }
 
     const payload = await res.json()
     if (payload.errors?.length) {
       if (!payload.data) {
-        console.error(`Linear GraphQL errors: ${JSON.stringify(payload.errors)}`)
+        this.logger.error(`Linear GraphQL errors: ${JSON.stringify(payload.errors)}`)
         throw new Error("Linear GraphQL request failed (see server logs)")
       }
-      console.warn(`Linear GraphQL partial errors: ${JSON.stringify(payload.errors)}`)
+      this.logger.warn(`Linear GraphQL partial errors: ${JSON.stringify(payload.errors)}`)
     }
 
     return payload.data as T

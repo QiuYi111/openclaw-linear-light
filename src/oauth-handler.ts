@@ -196,11 +196,14 @@ export async function handleOAuthCallback(api: OpenClawPluginApi, req: any, res:
     }
 
     // Store tokens in plugin-local storage
-    writeStoredToken({
-      accessToken: tokenData.access_token,
-      refreshToken: tokenData.refresh_token,
-      expiresAt: Date.now() + tokenData.expires_in * 1000,
-    })
+    writeStoredToken(
+      {
+        accessToken: tokenData.access_token,
+        refreshToken: tokenData.refresh_token,
+        expiresAt: Date.now() + tokenData.expires_in * 1000,
+      },
+      api.logger,
+    )
 
     api.logger.info("Linear Light: OAuth token obtained and stored successfully")
 

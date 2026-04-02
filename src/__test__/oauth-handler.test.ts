@@ -170,6 +170,7 @@ describe("handleOAuthCallback", () => {
         accessToken: "new-access",
         refreshToken: "new-refresh",
       }),
+      expect.anything(), // logger passed as second arg
     )
   })
 

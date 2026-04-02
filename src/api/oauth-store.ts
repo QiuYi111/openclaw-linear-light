@@ -9,6 +9,8 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import { homedir } from "node:os"
 import { join } from "node:path"
 
+import type { Logger } from "./linear-api.js"
+
 const TOKEN_DIR = join(homedir(), ".openclaw", "plugins", "linear-light")
 const TOKEN_PATH = join(TOKEN_DIR, "token.json")
 
@@ -37,7 +39,7 @@ export function readStoredToken(): StoredToken | null {
 /**
  * Write OAuth tokens to plugin-local storage using atomic write-then-rename.
  */
-export function writeStoredToken(token: StoredToken): void {
+export function writeStoredToken(token: StoredToken, logger?: Logger): void {
   try {
     if (!existsSync(TOKEN_DIR)) {
       mkdirSync(TOKEN_DIR, { recursive: true })
@@ -47,6 +49,7 @@ export function writeStoredToken(token: StoredToken): void {
     writeFileSync(tmpPath, JSON.stringify(token, null, 2), "utf8")
     renameSync(tmpPath, TOKEN_PATH)
   } catch (err) {
-    console.error(`Linear Light: failed to write token store: ${err}`)
+    const fallback = console as unknown as Logger
+    ;(logger ?? fallback).error(`Linear Light: failed to write token store: ${err}`)
   }
 }
