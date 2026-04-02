@@ -14,6 +14,7 @@
 
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk"
 import { LinearAgentApi, resolveLinearToken } from "./src/api/linear-api.js"
+import { handleOAuthCallback, handleOAuthInit } from "./src/oauth-handler.js"
 import { agentSessionMap, clearActiveRun, handleWebhook } from "./src/webhook-handler.js"
 
 export default function register(api: OpenClawPluginApi) {
@@ -25,8 +26,28 @@ export default function register(api: OpenClawPluginApi) {
   }
 
   const tokenInfo = resolveLinearToken(config)
+
+  // Always register OAuth routes (needed to obtain the first token)
+  api.registerHttpRoute({
+    path: "/linear-light/oauth/callback",
+    auth: "plugin",
+    match: "exact",
+    handler: async (req, res) => {
+      await handleOAuthCallback(api, req, res)
+    },
+  })
+
+  api.registerHttpRoute({
+    path: "/linear-light/oauth/init",
+    auth: "plugin",
+    match: "exact",
+    handler: async (req, res) => {
+      await handleOAuthInit(api, req, res)
+    },
+  })
+
   if (!tokenInfo.accessToken) {
-    api.logger.warn("Linear Light: no access token. Set LINEAR_ACCESS_TOKEN env var or run OAuth flow.")
+    api.logger.warn("Linear Light: no access token. Visit /linear-light/oauth/init to start OAuth flow.")
     return
   }
 

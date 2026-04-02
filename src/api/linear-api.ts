@@ -9,10 +9,21 @@ import { readFileSync, renameSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
 
+import { readStoredToken, writeStoredToken } from "./oauth-store.js"
+
 const LINEAR_GRAPHQL_URL = "https://api.linear.app/graphql"
 const LINEAR_OAUTH_TOKEN_URL = "https://api.linear.app/oauth/token"
 const CYRUS_CONFIG_PATH = join(homedir(), ".cyrus", "config.json")
 const REFRESH_BUFFER_MS = 60_000 // refresh 60s before expiry
+
+// Token refresh coalescing — prevents concurrent refreshes from consuming the same single-use refresh token.
+// Linear refresh tokens are single-use: each refresh returns a new one and invalidates the old.
+interface RefreshResult {
+  accessToken: string
+  refreshToken?: string
+  expiresAt: number
+}
+const pendingRefreshes = new Map<string, Promise<RefreshResult>>()
 
 export type ActivityContent =
   | { type: "thought"; body: string }
@@ -23,21 +34,32 @@ export type ActivityContent =
 
 /**
  * Resolve Linear access token from multiple sources.
- * Can read from Cyrus's config.json to reuse existing OAuth tokens.
+ * Priority: plugin config > plugin-local store > Cyrus config > env var.
  */
 export function resolveLinearToken(pluginConfig?: Record<string, unknown>): {
   accessToken: string | null
   refreshToken?: string
   expiresAt?: number
-  source: "config" | "env" | "cyrus" | "none"
+  source: "config" | "store" | "cyrus" | "env" | "none"
 } {
-  // 1. Plugin config
+  // 1. Plugin config (explicitly set token)
   const fromConfig = pluginConfig?.accessToken
   if (typeof fromConfig === "string" && fromConfig) {
     return { accessToken: fromConfig, source: "config" }
   }
 
-  // 2. Cyrus config (~/.cyrus/config.json) — reuse existing OAuth token
+  // 2. Plugin-local token store (~/.openclaw/plugins/linear-light/token.json)
+  const stored = readStoredToken()
+  if (stored) {
+    return {
+      accessToken: stored.accessToken,
+      refreshToken: stored.refreshToken,
+      expiresAt: stored.expiresAt,
+      source: "store",
+    }
+  }
+
+  // 3. Cyrus config (~/.cyrus/config.json) — reuse existing OAuth token
   try {
     const cyrusConfig = JSON.parse(readFileSync(CYRUS_CONFIG_PATH, "utf8"))
 
@@ -57,7 +79,7 @@ export function resolveLinearToken(pluginConfig?: Record<string, unknown>): {
     // Cyrus config not available
   }
 
-  // 3. Env var
+  // 4. Env var
   const fromEnv = process.env.LINEAR_ACCESS_TOKEN ?? process.env.LINEAR_API_KEY
   if (fromEnv) {
     return { accessToken: fromEnv, source: "env" }
@@ -97,6 +119,7 @@ export class LinearAgentApi {
 
   /**
    * Refresh the OAuth token if it has expired or is about to expire.
+   * Uses coalescing to prevent concurrent refreshes from consuming the same single-use refresh token.
    * Requires refreshToken, clientId, and clientSecret.
    */
   private async ensureValidToken(): Promise<void> {
@@ -104,6 +127,32 @@ export class LinearAgentApi {
     if (this.expiresAt == null) return
     if (Date.now() < this.expiresAt - REFRESH_BUFFER_MS) return
 
+    // Coalesce: if a refresh is already in flight for this client, await it and apply the result
+    const cacheKey = this.clientId
+    const pending = pendingRefreshes.get(cacheKey)
+    if (pending) {
+      const result = await pending
+      this.accessToken = result.accessToken
+      if (result.refreshToken) this.refreshToken = result.refreshToken
+      this.expiresAt = result.expiresAt
+      return
+    }
+
+    // Perform the refresh
+    const promise = this.doRefresh()
+    pendingRefreshes.set(cacheKey, promise)
+
+    try {
+      const result = await promise
+      this.accessToken = result.accessToken
+      if (result.refreshToken) this.refreshToken = result.refreshToken
+      this.expiresAt = result.expiresAt
+    } finally {
+      pendingRefreshes.delete(cacheKey)
+    }
+  }
+
+  private async doRefresh(): Promise<RefreshResult> {
     const res = await fetch(LINEAR_OAUTH_TOKEN_URL, {
       method: "POST",
       headers: {
@@ -112,9 +161,9 @@ export class LinearAgentApi {
       },
       body: new URLSearchParams({
         grant_type: "refresh_token",
-        client_id: this.clientId,
-        client_secret: this.clientSecret,
-        refresh_token: this.refreshToken,
+        client_id: this.clientId!,
+        client_secret: this.clientSecret!,
+        refresh_token: this.refreshToken!,
       }),
     })
 
@@ -129,19 +178,38 @@ export class LinearAgentApi {
       expires_in: number
     }
 
-    this.accessToken = data.access_token
-    if (data.refresh_token) this.refreshToken = data.refresh_token
-    this.expiresAt = Date.now() + data.expires_in * 1000
+    const result: RefreshResult = {
+      accessToken: data.access_token,
+      refreshToken: data.refresh_token,
+      expiresAt: Date.now() + data.expires_in * 1000,
+    }
+
+    this.accessToken = result.accessToken
+    if (result.refreshToken) this.refreshToken = result.refreshToken
+    this.expiresAt = result.expiresAt
 
     this.persistToken()
+    return result
   }
 
   /**
-   * Persist refreshed token back to Cyrus config to keep it in sync.
+   * Persist refreshed token to plugin-local store (and Cyrus config if sourced from there).
    */
   private persistToken(): void {
-    if (this.tokenSource !== "cyrus") return
+    // Always write to plugin-local store
+    writeStoredToken({
+      accessToken: this.accessToken,
+      refreshToken: this.refreshToken,
+      expiresAt: this.expiresAt,
+    })
 
+    // Also sync to Cyrus config if that's where the token came from
+    if (this.tokenSource === "cyrus") {
+      this.persistToCyrusConfig()
+    }
+  }
+
+  private persistToCyrusConfig(): void {
     try {
       const raw = readFileSync(CYRUS_CONFIG_PATH, "utf8")
       const store = JSON.parse(raw)

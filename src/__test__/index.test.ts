@@ -20,6 +20,13 @@ vi.mock("node:fs", () => ({
     throw new Error("no file")
   }),
   writeFileSync: vi.fn(),
+  renameSync: vi.fn(),
+}))
+
+// Mock oauth-store — return null by default (no stored token)
+vi.mock("../../src/api/oauth-store.js", () => ({
+  readStoredToken: vi.fn(() => null),
+  writeStoredToken: vi.fn(),
 }))
 
 // Mock crypto for webhook signature
@@ -135,7 +142,7 @@ describe("plugin register()", () => {
     expect(api.registerTool).not.toHaveBeenCalled()
   })
 
-  it("warns and skips when no access token", async () => {
+  it("warns and skips webhook/tools when no access token, but registers OAuth routes", async () => {
     const mod = await import("../../index.js")
     const api = makeApi({ enabled: true, accessToken: undefined })
     delete process.env.LINEAR_ACCESS_TOKEN
@@ -143,14 +150,27 @@ describe("plugin register()", () => {
 
     mod.default(api)
     expect(mockLogger.warn).toHaveBeenCalledWith(expect.stringContaining("no access token"))
+
+    // OAuth routes should still be registered
+    const paths = api.registerHttpRoute.mock.calls.map((call: any) => call[0].path)
+    expect(paths).toContain("/linear-light/oauth/callback")
+    expect(paths).toContain("/linear-light/oauth/init")
+
+    // Webhook and tools should NOT be registered
+    expect(paths).not.toContain("/linear-light/webhook")
+    expect(api.registerTool).not.toHaveBeenCalled()
   })
 
-  it("registers webhook route, tools, and lifecycle hook", async () => {
+  it("registers OAuth routes, webhook route, tools, and lifecycle hook", async () => {
     const mod = await import("../../index.js")
     const api = makeApi()
 
     mod.default(api)
-    expect(api.registerHttpRoute).toHaveBeenCalledWith(expect.objectContaining({ path: "/linear-light/webhook" }))
+
+    const paths = api.registerHttpRoute.mock.calls.map((call: any) => call[0].path)
+    expect(paths).toContain("/linear-light/oauth/callback")
+    expect(paths).toContain("/linear-light/oauth/init")
+    expect(paths).toContain("/linear-light/webhook")
     expect(api.registerTool).toHaveBeenCalled()
     expect(api.registerHook).toHaveBeenCalledWith("subagent_ended", expect.any(Function))
   })
