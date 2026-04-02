@@ -268,6 +268,7 @@ describe("handleWebhook", () => {
 
       // Mock fetch for updateIssueState flow:
       // 1) getIssueDetails  2) getTeamStates  3) issueUpdate mutation
+      // 4) emitActivity (initial thought)
       mockFetch
         .mockResolvedValueOnce({
           ok: true,
@@ -303,6 +304,10 @@ describe("handleWebhook", () => {
           ok: true,
           json: () => Promise.resolve({ data: { issueUpdate: { success: true } } }),
         })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve({ data: { agentActivityCreate: { success: true } } }),
+        })
 
       const payload = uniqueCreated()
       const { req, res } = makeSignedReq(payload, SECRET)
@@ -310,8 +315,8 @@ describe("handleWebhook", () => {
       await handleWebhook(api, req, res)
 
       expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
-      // 3 fetch calls for the status update flow
-      expect(mockFetch).toHaveBeenCalledTimes(3)
+      // 3 fetch calls for the status update flow + 1 for emitActivity
+      expect(mockFetch).toHaveBeenCalledTimes(4)
       const updateCall = mockFetch.mock.calls[2]
       const body = JSON.parse(updateCall[1].body)
       expect(body.variables.input.stateId).toBe("s-ip")
@@ -442,9 +447,34 @@ describe("handleWebhook", () => {
   describe("Comment create event", () => {
     // -----------------------------------------------------------------------
 
-    it("handles Comment type webhooks (fallback path)", async () => {
+    it("handles Comment type webhooks (fallback path) — dispatches agent when token available", async () => {
       const { handleWebhook } = await import("../webhook-handler.js")
-      const api = makeApi()
+      const api = makeApi({ accessToken: "lin_test_token" })
+
+      // Mock fetch for: getIssueDetails (for handleCommentCreate)
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            data: {
+              issue: {
+                id: `issue-comment-${uid}`,
+                identifier: "ENG-99",
+                title: "Comment Issue",
+                description: "From comment",
+                url: "https://linear.app/eng/issue/ENG-99",
+                state: { name: "Todo", type: "unstarted" },
+                creator: null,
+                assignee: null,
+                labels: { nodes: [] },
+                team: { id: "team-001", key: "ENG", name: "Engineering" },
+                comments: { nodes: [] },
+                project: null,
+              },
+            },
+          }),
+      })
+
       const payload = {
         type: "Comment",
         action: "create",
@@ -460,8 +490,141 @@ describe("handleWebhook", () => {
       await handleWebhook(api, req, res)
 
       expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
-      // Comment path does not dispatch agent
+      // Comment fallback path should dispatch agent
+      expect(mockSubagentRun).toHaveBeenCalled()
+    })
+
+    it("comment fallback skips when no token available", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi()
+      // No accessToken configured
+      const payload = {
+        type: "Comment",
+        action: "create",
+        createdAt: `2026-04-01T13:00:${String(uid++).padStart(2, "0")}.000Z`,
+        data: {
+          id: `comment-notoken-${uid}`,
+          body: "@Linus help please",
+          issue: { id: `issue-notoken-${uid}` },
+        },
+      }
+      const { req, res } = makeSignedReq(payload, SECRET)
+
+      await handleWebhook(api, req, res)
+
+      expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
       expect(mockSubagentRun).not.toHaveBeenCalled()
+    })
+
+    it("comment fallback handles getIssueDetails failure gracefully", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi({ accessToken: "lin_test_token" })
+
+      mockFetch.mockRejectedValueOnce(new Error("fetch failed"))
+
+      const payload = {
+        type: "Comment",
+        action: "create",
+        createdAt: `2026-04-01T13:00:${String(uid++).padStart(2, "0")}.000Z`,
+        data: {
+          id: `comment-fetch-fail-${uid}`,
+          body: "@Linus help",
+          issue: { id: `issue-fetch-fail-${uid}` },
+        },
+      }
+      const { req, res } = makeSignedReq(payload, SECRET)
+
+      await handleWebhook(api, req, res)
+
+      expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
+      expect(mockSubagentRun).not.toHaveBeenCalled()
+    })
+
+    it("comment fallback updates status to In Progress", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi({ accessToken: "lin_test_token" })
+
+      const commentIssueId = `issue-cf-status-${uid}`
+      // handleCommentCreate calls getIssueDetails, then updateIssueState calls:
+      //   getIssueDetails again + getTeamStates + issueUpdate
+      mockFetch
+        // 1) getIssueDetails (handleCommentCreate)
+        .mockResolvedValueOnce({
+          ok: true,
+          json: () =>
+            Promise.resolve({
+              data: {
+                issue: {
+                  id: commentIssueId,
+                  identifier: "ENG-88",
+                  title: "Comment Status",
+                  description: "Test",
+                  url: "https://linear.app/eng/issue/ENG-88",
+                  state: { name: "Todo", type: "unstarted" },
+                  creator: null,
+                  assignee: null,
+                  labels: { nodes: [] },
+                  team: { id: "team-001", key: "ENG", name: "Engineering" },
+                  comments: { nodes: [] },
+                  project: null,
+                },
+              },
+            }),
+        })
+        // 2) getIssueDetails (updateIssueState internal)
+        .mockResolvedValueOnce({
+          ok: true,
+          json: () =>
+            Promise.resolve({
+              data: {
+                issue: {
+                  id: commentIssueId,
+                  team: { id: "team-001", key: "ENG", name: "Engineering" },
+                },
+              },
+            }),
+        })
+        // 3) getTeamStates
+        .mockResolvedValueOnce({
+          ok: true,
+          json: () =>
+            Promise.resolve({
+              data: {
+                team: {
+                  states: {
+                    nodes: [
+                      { id: "s-todo", name: "Todo" },
+                      { id: "s-ip", name: "In Progress" },
+                    ],
+                  },
+                },
+              },
+            }),
+        })
+        // 4) issueUpdate
+        .mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve({ data: { issueUpdate: { success: true } } }),
+        })
+
+      const payload = {
+        type: "Comment",
+        action: "create",
+        createdAt: `2026-04-01T13:00:${String(uid++).padStart(2, "0")}.000Z`,
+        data: {
+          id: `comment-cf-status-${uid}`,
+          body: "@Linus update status",
+          issue: { id: commentIssueId },
+        },
+      }
+      const { req, res } = makeSignedReq(payload, SECRET)
+
+      await handleWebhook(api, req, res)
+
+      expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
+      expect(mockSubagentRun).toHaveBeenCalled()
+      // 4 fetch calls: getIssueDetails (handleCommentCreate) + getIssueDetails + getTeamStates + issueUpdate (updateIssueState)
+      expect(mockFetch).toHaveBeenCalledTimes(4)
     })
 
     it("skips Comment without mention trigger", async () => {

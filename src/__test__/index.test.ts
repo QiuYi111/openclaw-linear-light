@@ -267,7 +267,7 @@ describe("tools", () => {
   })
 
   it("linear_comment tool posts a comment", async () => {
-    mockFetch.mockResolvedValue({
+    mockFetch.mockResolvedValueOnce({
       ok: true,
       json: () =>
         Promise.resolve({
@@ -388,6 +388,63 @@ describe("tools", () => {
     expect(result.details).toEqual({ status: "failed" })
   })
 
+  it("linear_comment emits response activity when agentSessionId exists", async () => {
+    const { agentSessionMap } = await import("../../src/webhook-handler.js")
+    agentSessionMap.set("issue-emit-1", "sess-emit-1")
+
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            data: { commentCreate: { success: true, comment: { id: "c-emit" } } },
+          }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ data: { agentActivityCreate: { success: true } } }),
+      })
+
+    const mod = await import("../../index.js")
+    const api = makeApi()
+    mod.default(api)
+
+    const commentTool = api.registerTool.mock.calls.find((call: any) => call[0].name === "linear_comment")?.[0]
+    const result = await commentTool.execute("tc-emit", { issueId: "issue-emit-1", body: "Activity test" })
+
+    expect(result.content[0].text).toContain("issue-emit-1")
+    expect(mockFetch).toHaveBeenCalledTimes(2) // createComment + emitActivity
+    agentSessionMap.delete("issue-emit-1")
+  })
+
+  it("linear_comment emits error activity when comment fails and agentSessionId exists", async () => {
+    const { agentSessionMap } = await import("../../src/webhook-handler.js")
+    agentSessionMap.set("issue-err-1", "sess-err-1")
+
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        text: () => Promise.resolve("Server Error"),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ data: { agentActivityCreate: { success: true } } }),
+      })
+
+    const mod = await import("../../index.js")
+    const api = makeApi()
+    mod.default(api)
+
+    const commentTool = api.registerTool.mock.calls.find((call: any) => call[0].name === "linear_comment")?.[0]
+    const result = await commentTool.execute("tc-err", { issueId: "issue-err-1", body: "fail" })
+
+    expect(result.content[0].text).toContain("Failed")
+    expect(result.details).toEqual({ status: "failed" })
+    expect(mockFetch).toHaveBeenCalledTimes(2) // createComment failed + emitActivity error
+    agentSessionMap.delete("issue-err-1")
+  })
+
   it("linear_update_status error path returns failure", async () => {
     mockFetch.mockResolvedValue({
       ok: false,
@@ -474,9 +531,31 @@ describe("tools", () => {
     const hook = api.registerHook.mock.calls[0][1]
     await hook({ sessionKey: "linear:issue-1", success: false })
 
-    // Should not update status or send notification
+    // Should not update status or send notification (no agentSessionId in map)
     expect(mockFetch).not.toHaveBeenCalled()
     expect(mockSendMessageTelegram).not.toHaveBeenCalled()
+  })
+
+  it("onSubagentEnded emits error activity when session fails with agentSessionId", async () => {
+    const { agentSessionMap } = await import("../../src/webhook-handler.js")
+    agentSessionMap.set("issue-fail-1", "sess-fail-1")
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ data: { agentActivityCreate: { success: true } } }),
+    })
+
+    const mod = await import("../../index.js")
+    const api = makeApi()
+    mod.default(api)
+
+    const hook = api.registerHook.mock.calls[0][1]
+    await hook({ sessionKey: "linear:issue-fail-1", success: false })
+
+    expect(mockFetch).toHaveBeenCalledTimes(1) // emitActivity error
+    expect(mockSendMessageTelegram).not.toHaveBeenCalled()
+    // agentSessionMap should be cleaned up in finally
+    expect(agentSessionMap.has("issue-fail-1")).toBe(false)
   })
 
   it("onSubagentEnded skips when no runtime channel", async () => {
