@@ -19,6 +19,20 @@ vi.mock("node:crypto", () => ({
   })),
 }))
 
+// Mock fs for oauth-state-store
+const mockFsExistsSync = vi.fn(() => true)
+const mockFsMkdirSync = vi.fn()
+const mockFsReadFileSync = vi.fn(() => "{}")
+const mockFsWriteFileSync = vi.fn()
+const mockFsRenameSync = vi.fn()
+vi.mock("node:fs", () => ({
+  existsSync: mockFsExistsSync,
+  mkdirSync: mockFsMkdirSync,
+  readFileSync: mockFsReadFileSync,
+  writeFileSync: mockFsWriteFileSync,
+  renameSync: mockFsRenameSync,
+}))
+
 // Mock oauth-store
 const mockWriteStoredToken = vi.fn()
 vi.mock("../api/oauth-store.js", () => ({
@@ -72,6 +86,8 @@ function makeRes() {
 describe("generateAuthorizationURL", () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    mockFsExistsSync.mockReturnValue(true)
+    mockFsReadFileSync.mockReturnValue("{}")
   })
 
   it("generates a valid authorization URL with PKCE and actor=app", async () => {
@@ -107,6 +123,8 @@ describe("generateAuthorizationURL", () => {
 describe("handleOAuthInit", () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    mockFsExistsSync.mockReturnValue(true)
+    mockFsReadFileSync.mockReturnValue("{}")
   })
 
   it("redirects to Linear authorize URL", async () => {
@@ -138,6 +156,8 @@ describe("handleOAuthInit", () => {
 describe("handleOAuthCallback", () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    mockFsExistsSync.mockReturnValue(true)
+    mockFsReadFileSync.mockReturnValue("{}")
   })
 
   it("exchanges code for tokens and stores them", async () => {
@@ -145,6 +165,12 @@ describe("handleOAuthCallback", () => {
 
     // First, generate a URL to create a pending state
     generateAuthorizationURL("test-client-id", "https://localhost:3000/linear-light/oauth/callback")
+
+    // Feed the written content back to readFileSync so getPendingState can find the state
+    const writtenContent = mockFsWriteFileSync.mock.calls[0]?.[1] as string | undefined
+    if (writtenContent) {
+      mockFsReadFileSync.mockReturnValue(writtenContent)
+    }
 
     // Mock the token exchange
     mockFetch.mockResolvedValueOnce({
@@ -215,6 +241,11 @@ describe("handleOAuthCallback", () => {
 
     generateAuthorizationURL("test-client-id", "https://localhost:3000/linear-light/oauth/callback")
 
+    const writtenContent = mockFsWriteFileSync.mock.calls[0]?.[1] as string | undefined
+    if (writtenContent) {
+      mockFsReadFileSync.mockReturnValue(writtenContent)
+    }
+
     const api = makeApi({ linearClientId: undefined, linearClientSecret: undefined })
     delete process.env.LINEAR_CLIENT_ID
     delete process.env.LINEAR_CLIENT_SECRET
@@ -232,6 +263,11 @@ describe("handleOAuthCallback", () => {
     const { handleOAuthCallback, generateAuthorizationURL } = await import("../oauth-handler.js")
 
     generateAuthorizationURL("test-client-id", "https://localhost:3000/linear-light/oauth/callback")
+
+    const writtenContent = mockFsWriteFileSync.mock.calls[0]?.[1] as string | undefined
+    if (writtenContent) {
+      mockFsReadFileSync.mockReturnValue(writtenContent)
+    }
 
     mockFetch.mockResolvedValueOnce({
       ok: false,
@@ -254,6 +290,11 @@ describe("handleOAuthCallback", () => {
 
     generateAuthorizationURL("test-client-id", "https://localhost:3000/linear-light/oauth/callback")
 
+    const writtenContent = mockFsWriteFileSync.mock.calls[0]?.[1] as string | undefined
+    if (writtenContent) {
+      mockFsReadFileSync.mockReturnValue(writtenContent)
+    }
+
     mockFetch.mockRejectedValueOnce(new Error("network error"))
 
     const api = makeApi()
@@ -271,6 +312,11 @@ describe("handleOAuthCallback", () => {
 
     // Init with one host
     generateAuthorizationURL("test-client-id", "https://original-host:8080/linear-light/oauth/callback")
+
+    const writtenContent = mockFsWriteFileSync.mock.calls[0]?.[1] as string | undefined
+    if (writtenContent) {
+      mockFsReadFileSync.mockReturnValue(writtenContent)
+    }
 
     mockFetch.mockResolvedValueOnce({
       ok: true,

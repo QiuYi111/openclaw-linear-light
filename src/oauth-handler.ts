@@ -9,22 +9,14 @@
 import { createHash, randomBytes } from "node:crypto"
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk"
 
+import { deletePendingState, getPendingState, savePendingState } from "./api/oauth-state-store.js"
 import { writeStoredToken } from "./api/oauth-store.js"
 
 const LINEAR_AUTHORIZE_URL = "https://linear.app/oauth/authorize"
 const LINEAR_TOKEN_URL = "https://api.linear.app/oauth/token"
 const DEFAULT_SCOPES = "read,write"
 
-// In-flight PKCE state for CSRF protection
-const pendingStates = new Map<string, { codeVerifier: string; redirectUri: string; expiresAt: number }>()
 const STATE_TTL_MS = 600_000 // 10 minutes
-
-function cleanupExpiredStates(): void {
-  const now = Date.now()
-  for (const [key, val] of pendingStates) {
-    if (now > val.expiresAt) pendingStates.delete(key)
-  }
-}
 
 /**
  * Read query string from a stream-based request URL.
@@ -64,8 +56,8 @@ export function generateAuthorizationURL(
   const state = opts?.state || randomBytes(16).toString("hex")
   const scopes = opts?.scopes || DEFAULT_SCOPES
 
-  // Store PKCE verifier and redirect URI for callback validation
-  pendingStates.set(state, {
+  // Store PKCE verifier and redirect URI for callback validation (persisted to disk)
+  savePendingState(state, {
     codeVerifier,
     redirectUri,
     expiresAt: Date.now() + STATE_TTL_MS,
@@ -138,9 +130,8 @@ export async function handleOAuthCallback(api: OpenClawPluginApi, req: any, res:
     return
   }
 
-  // Validate state (CSRF protection)
-  cleanupExpiredStates()
-  const pending = pendingStates.get(state)
+  // Validate state (CSRF protection) — reads from disk, cleans up expired entries
+  const pending = getPendingState(state)
   if (!pending) {
     api.logger.error("Linear Light: OAuth callback with invalid or expired state")
     res.writeHead(400, { "Content-Type": "text/html" })
@@ -148,7 +139,7 @@ export async function handleOAuthCallback(api: OpenClawPluginApi, req: any, res:
     return
   }
   const { codeVerifier, redirectUri } = pending
-  pendingStates.delete(state)
+  deletePendingState(state)
 
   const clientId = (config?.linearClientId as string) || process.env.LINEAR_CLIENT_ID
   const clientSecret = (config?.linearClientSecret as string) || process.env.LINEAR_CLIENT_SECRET
