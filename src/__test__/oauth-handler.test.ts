@@ -151,6 +151,26 @@ describe("handleOAuthInit", () => {
     expect(res.statusCode).toBe(400)
     expect(res.body).toContain("linearClientId not configured")
   })
+
+  it("uses fallback defaults when x-forwarded-proto and host headers are missing", async () => {
+    const { handleOAuthInit } = await import("../oauth-handler.js")
+    const api = makeApi()
+    const req = {
+      url: "/linear-light/oauth/init",
+      headers: {}, // no x-forwarded-proto, no host
+    }
+    const res = makeRes()
+
+    await handleOAuthInit(api, req, res)
+
+    expect(res.statusCode).toBe(302)
+    // The redirect_uri should use "https" and "localhost" as fallbacks
+    const location = res.headers.Location as string
+    // The redirect_uri is embedded in the URL params
+    expect(location).toContain("redirect_uri=")
+    const decoded = decodeURIComponent(location)
+    expect(decoded).toContain("https://localhost/linear-light/oauth/callback")
+  })
 })
 
 describe("handleOAuthCallback", () => {
@@ -158,6 +178,32 @@ describe("handleOAuthCallback", () => {
     vi.clearAllMocks()
     mockFsExistsSync.mockReturnValue(true)
     mockFsReadFileSync.mockReturnValue("{}")
+  })
+
+  it("parses query params from URL with no query string (empty params)", async () => {
+    const { handleOAuthCallback } = await import("../oauth-handler.js")
+    const api = makeApi()
+    const req = { url: "/linear-light/oauth/callback", headers: { host: "localhost" } }
+    const res = makeRes()
+
+    await handleOAuthCallback(api, req, res)
+
+    // No code or state → 400
+    expect(res.statusCode).toBe(400)
+    expect(res.body).toContain("Missing code or state")
+  })
+
+  it("parses query params with valueless param (no = sign)", async () => {
+    const { handleOAuthCallback } = await import("../oauth-handler.js")
+    const api = makeApi()
+    // URL with a param that has no = sign (should be skipped)
+    const req = { url: "/linear-light/oauth/callback?justakey&code=test&state=invalid", headers: { host: "localhost" } }
+    const res = makeRes()
+
+    await handleOAuthCallback(api, req, res)
+
+    // state is invalid → 400
+    expect(res.statusCode).toBe(400)
   })
 
   it("exchanges code for tokens and stores them", async () => {
@@ -342,5 +388,36 @@ describe("handleOAuthCallback", () => {
     // Verify the token exchange used the original redirect URI
     const fetchBody = mockFetch.mock.calls[0][1]?.body as URLSearchParams
     expect(fetchBody.get("redirect_uri")).toBe("https://original-host:8080/linear-light/oauth/callback")
+  })
+
+  it("rejects expired state via cleanupExpiredStates", async () => {
+    vi.useFakeTimers()
+    try {
+      const { handleOAuthCallback, generateAuthorizationURL } = await import("../oauth-handler.js")
+
+      // Generate a pending state — this writes to mockFsWriteFileSync
+      const { state } = generateAuthorizationURL("test-client-id", "https://localhost:3000/linear-light/oauth/callback")
+
+      // Wire up readFileSync to return what init just wrote
+      const writtenContent = mockFsWriteFileSync.mock.calls[0]?.[1] as string | undefined
+      if (writtenContent) {
+        mockFsReadFileSync.mockReturnValue(writtenContent)
+      }
+
+      // Advance past STATE_TTL_MS (600_000ms = 10 minutes)
+      vi.advanceTimersByTime(600_001)
+
+      const api = makeApi()
+      const req = makeReq(`/linear-light/oauth/callback?code=test-code&state=${state}`)
+      const res = makeRes()
+
+      await handleOAuthCallback(api, req, res)
+
+      // State should have been cleaned up by readPendingStates → 400
+      expect(res.statusCode).toBe(400)
+      expect(res.body).toContain("Invalid or expired state")
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
