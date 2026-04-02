@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { makeAgentSessionCreated, makeAgentSessionPrompted, signPayload } from "./fixtures"
 
+// Cache the real Date.now so we can restore after fake timer tests
+const realDateNow = Date.now
+
 // ---------------------------------------------------------------------------
 // Webhook handler unit tests
 // ---------------------------------------------------------------------------
@@ -1253,6 +1256,81 @@ describe("handleWebhook", () => {
       await handleWebhook(api, req, res)
 
       expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
+    })
+  })
+
+  // -----------------------------------------------------------------------
+  describe("TTL-based activeRuns expiry", () => {
+    // -----------------------------------------------------------------------
+
+    afterEach(() => {
+      Date.now = realDateNow
+    })
+
+    it("expired activeRuns entry allows re-dispatch after TTL", async () => {
+      const { handleWebhook, ACTIVE_RUN_TTL_MS } = await import("../webhook-handler.js")
+      const api = makeApi()
+
+      // First dispatch — agent starts, session key recorded
+      const now = Date.now()
+      const payload1 = uniqueCreated()
+      const { req: req1, res: res1 } = makeSignedReq(payload1, SECRET)
+      await handleWebhook(api, req1, res1)
+      expect(res1.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
+      expect(mockSubagentRun).toHaveBeenCalledTimes(1)
+
+      // Simulate time passing beyond TTL (crash scenario — clearActiveRun never called)
+      const expiredTime = now + ACTIVE_RUN_TTL_MS + 1000
+      Date.now = () => expiredTime
+
+      // Second dispatch for same issue (different session ID to bypass dedup)
+      // Should succeed because the stale entry was swept
+      mockSubagentRun.mockClear()
+      const n = uid++
+      const payload2 = makeAgentSessionCreated({
+        createdAt: `2099-06-01T00:00:${String(n).padStart(2, "0")}.000Z`,
+        agentSession: {
+          ...makeAgentSessionCreated().agentSession,
+          id: `sess-ttl-${n}`,
+          issue: payload1.agentSession.issue,
+        },
+      })
+      const { req: req2, res: res2 } = makeSignedReq(payload2, SECRET)
+      await handleWebhook(api, req2, res2)
+
+      expect(res2.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
+      expect(mockSubagentRun).toHaveBeenCalledTimes(1)
+    })
+
+    it("does NOT re-dispatch before TTL expires", async () => {
+      const { handleWebhook, ACTIVE_RUN_TTL_MS } = await import("../webhook-handler.js")
+      const api = makeApi()
+
+      const now = Date.now()
+      const payload1 = uniqueCreated()
+      const { req: req1, res: res1 } = makeSignedReq(payload1, SECRET)
+      await handleWebhook(api, req1, res1)
+      expect(mockSubagentRun).toHaveBeenCalledTimes(1)
+
+      // Advance time but stay within TTL
+      Date.now = () => now + ACTIVE_RUN_TTL_MS - 1000
+
+      mockSubagentRun.mockClear()
+      const n = uid++
+      const payload2 = makeAgentSessionCreated({
+        createdAt: `2099-07-01T00:00:${String(n).padStart(2, "0")}.000Z`,
+        agentSession: {
+          ...makeAgentSessionCreated().agentSession,
+          id: `sess-early-${n}`,
+          issue: payload1.agentSession.issue,
+        },
+      })
+      const { req: req2, res: res2 } = makeSignedReq(payload2, SECRET)
+      await handleWebhook(api, req2, res2)
+
+      // activeRuns still has the entry — blocked
+      expect(res2.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
+      expect(mockSubagentRun).not.toHaveBeenCalled()
     })
   })
 })
