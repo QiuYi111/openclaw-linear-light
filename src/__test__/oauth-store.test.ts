@@ -108,5 +108,22 @@ describe("oauth-store", () => {
       expect(() => writeStoredToken({ accessToken: "at" }, mockLogger)).not.toThrow()
       expect(mockLogger.error).toHaveBeenCalledWith(expect.stringContaining("failed to write token store"))
     })
+
+    it("falls back to console.error when no logger is provided", async () => {
+      mockExistsSync.mockReturnValue(true)
+      mockWriteFileSync.mockImplementation(() => {
+        throw new Error("disk full")
+      })
+
+      const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {})
+
+      const { writeStoredToken } = await import("../api/oauth-store.js")
+
+      // Call without logger (undefined) — should fallback to console.error
+      expect(() => writeStoredToken({ accessToken: "at" })).not.toThrow()
+      expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining("failed to write token store"))
+
+      consoleSpy.mockRestore()
+    })
   })
 })

@@ -331,6 +331,44 @@ describe("LinearAgentApi", () => {
       await expect(api.getTeams()).rejects.toThrow("Linear API request failed (401)")
       expect(logger.error).toHaveBeenCalled()
     })
+
+    it("throws on GraphQL errors without data after retry (after refresh path)", async () => {
+      // Lines 268-269: after 401 → refresh → retry, the retry response has
+      // GraphQL errors but no data — should log and throw.
+      const { LinearAgentApi } = await import("../api/linear-api.js")
+      const logger = makeApi()
+      const api = new LinearAgentApi("expired-token", {
+        refreshToken: "refresh-123",
+        clientId: "cid",
+        clientSecret: "csec",
+        expiresAt: Date.now() + 3600_000,
+        logger,
+      })
+
+      // First call: 401
+      mockFetch.mockResolvedValueOnce({ ok: false, status: 401 })
+      // Refresh succeeds
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            access_token: "new-token",
+            refresh_token: "new-refresh",
+            expires_in: 3600,
+          }),
+      })
+      // Retry: GraphQL errors without data
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            errors: [{ message: "Permission denied" }],
+          }),
+      })
+
+      await expect(api.getTeams()).rejects.toThrow("Linear GraphQL request failed (see server logs)")
+      expect(logger.error).toHaveBeenCalledWith(expect.stringContaining("GraphQL errors (after refresh)"))
+    })
   })
 
   describe("emitActivity", () => {
@@ -547,6 +585,73 @@ describe("LinearAgentApi", () => {
       // For this test, we just verify the first refresh set the success time
       // and a subsequent request within cooldown coalesces (tested above).
       // The cooldown expiry is a time-based behavior best tested via integration.
+    })
+
+    it("clears expired cooldown promise and triggers new refresh", async () => {
+      // After cooldown expires, the stale refreshPromise is cleared (line 127)
+      // and a new refresh is triggered when the token is also expired.
+      vi.useFakeTimers()
+      try {
+        const { LinearAgentApi } = await import("../api/linear-api.js")
+        const api = new LinearAgentApi("token-1", {
+          refreshToken: "refresh-1",
+          clientId: "cid",
+          clientSecret: "csec",
+          expiresAt: Date.now() + 3600_000,
+        })
+
+        let refreshCount = 0
+
+        // First request: 401 → refresh
+        mockFetch.mockResolvedValueOnce({ ok: false, status: 401 })
+        mockFetch.mockImplementationOnce(async () => {
+          refreshCount++
+          return {
+            ok: true,
+            json: () =>
+              Promise.resolve({
+                access_token: "token-2",
+                refresh_token: "refresh-2",
+                expires_in: 1, // 1ms — token expires almost immediately
+              }),
+          }
+        })
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve({ data: { teams: { nodes: [] } } }),
+        })
+
+        await api.getTeams()
+        expect(refreshCount).toBe(1)
+
+        // Advance past cooldown (5s) + buffer (60s) to ensure both
+        // cooldown expiry and token expiry conditions are met
+        vi.advanceTimersByTime(6_100)
+
+        // Second request: cooldown expired AND token expired → new refresh
+        mockFetch.mockImplementationOnce(async () => {
+          refreshCount++
+          return {
+            ok: true,
+            json: () =>
+              Promise.resolve({
+                access_token: "token-3",
+                refresh_token: "refresh-3",
+                expires_in: 3600,
+              }),
+          }
+        })
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve({ data: { teams: { nodes: [] } } }),
+        })
+
+        await api.getTeams()
+        // A new refresh should have been triggered (cooldown expired + token expired)
+        expect(refreshCount).toBe(2)
+      } finally {
+        vi.useRealTimers()
+      }
     })
 
     it("stale promise cleanup: on refresh failure, next request can retry fresh", async () => {
@@ -1089,6 +1194,42 @@ describe("LinearAgentApi", () => {
       expect(written.linearWorkspaces.myWorkspace.someOtherField).toBe("preserve-me")
       expect(written.otherTopLevel).toBe("keep-this")
     })
+
+    it("skips refreshToken persistence when refreshToken is undefined", async () => {
+      const { LinearAgentApi } = await import("../api/linear-api.js")
+
+      mockReadFileSync.mockReturnValue(
+        JSON.stringify({
+          linearWorkspaces: {
+            myWorkspace: {
+              linearToken: "old-token",
+              linearRefreshToken: "old-refresh",
+              linearTokenExpiresAt: 1000,
+            },
+          },
+        }),
+      )
+
+      // No refreshToken provided — ensureValidToken will skip refresh
+      // (requires refreshToken && clientId && clientSecret)
+      const api = new LinearAgentApi("old-token", {
+        clientId: "cid",
+        clientSecret: "csec",
+        expiresAt: Date.now() - 1000,
+        source: "cyrus",
+      })
+
+      // No refresh happens (no refreshToken) — only API call
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ data: { teams: { nodes: [] } } }),
+      })
+
+      await api.getTeams()
+
+      // No persistence since no refresh happened (refreshToken is undefined)
+      expect(mockWriteFileSync).not.toHaveBeenCalled()
+    })
   })
 
   describe("resolveLinearToken", () => {
@@ -1400,6 +1541,26 @@ describe("LinearAgentApi", () => {
       })
 
       await expect(api.updateIssueState("issue-1", "Nonexistent")).rejects.toThrow('State "Nonexistent" not found')
+    })
+
+    it("throws when issue has no team", async () => {
+      const { LinearAgentApi } = await import("../api/linear-api.js")
+      const api = new LinearAgentApi("lin_api_test")
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            data: {
+              issue: {
+                id: "issue-1",
+                team: null, // no team
+              },
+            },
+          }),
+      })
+
+      await expect(api.updateIssueState("issue-1", "Done")).rejects.toThrow("Cannot find team for issue")
     })
   })
 })

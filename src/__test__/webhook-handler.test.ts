@@ -138,6 +138,22 @@ describe("handleWebhook", () => {
   describe("signature verification", () => {
     // -----------------------------------------------------------------------
 
+    it("returns 500 when no webhook secret configured", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const noSecretApi = makeApi()
+      // Remove webhookSecret from config and clear env
+      noSecretApi.pluginConfig.webhookSecret = undefined
+      delete process.env.LINEAR_WEBHOOK_SECRET
+
+      const payload = uniqueCreated()
+      const { req } = makeSignedReq(payload, SECRET)
+      const res = { writeHead: vi.fn(), end: vi.fn() } as any
+
+      await handleWebhook(noSecretApi, req, res)
+      expect(res.writeHead).toHaveBeenCalledWith(500, expect.any(Object))
+      expect(res.end).toHaveBeenCalledWith(expect.stringContaining("no webhook secret configured"))
+    })
+
     it("rejects requests without signature header", async () => {
       const { handleWebhook } = await import("../webhook-handler.js")
       const api = makeApi()
@@ -178,6 +194,28 @@ describe("handleWebhook", () => {
 
       await handleWebhook(api, req, res)
       expect(res.writeHead).toHaveBeenCalledWith(401, expect.any(Object))
+    })
+
+    it("returns 400 with default message when readBody fails without error string", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi()
+      const sig = "valid-sig"
+
+      // Request that triggers "timeout" (which has no rawBuffer, and error = "timeout")
+      // We need ok=false with an error to hit the `error || "bad request"` fallback
+      const req = {
+        headers: { "linear-signature": sig },
+        on: vi.fn((event: string, cb: (...args: any[]) => void) => {
+          if (event === "end") cb()
+          // Don't send any data — body will be empty → invalid JSON
+        }),
+      }
+
+      const res = { writeHead: vi.fn(), end: vi.fn() } as any
+
+      await handleWebhook(api, req, res)
+      // readBody returns ok=false for invalid JSON → 400 with "bad request" (no error string)
+      expect(res.writeHead).toHaveBeenCalledWith(400, expect.any(Object))
     })
 
     it("accepts requests with valid signature", async () => {
@@ -644,6 +682,61 @@ describe("handleWebhook", () => {
       // Rollback call (6th fetch) should target "Todo" state
       const rollbackBody = JSON.parse(mockFetch.mock.calls[5][1].body)
       expect(rollbackBody.variables.input.stateId).toBe("s-todo")
+    })
+
+    it("logs warning when rollback fails after subagent.run() throws (handleSessionCreated)", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi({ accessToken: "lin_test_token" })
+
+      mockSubagentRun.mockRejectedValueOnce(new Error("agent crashed"))
+
+      const payload = uniqueCreated()
+      const issueId = payload.agentSession.issue.id
+
+      const issueResponse = {
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            data: {
+              issue: { id: issueId, identifier: "ENG-X", team: { id: "team-001", key: "ENG", name: "Eng" } },
+            },
+          }),
+      }
+      const statesResponse = {
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            data: {
+              team: {
+                states: {
+                  nodes: [
+                    { id: "s-todo", name: "Todo" },
+                    { id: "s-ip", name: "In Progress" },
+                  ],
+                },
+              },
+            },
+          }),
+      }
+      const updateResponse = {
+        ok: true,
+        json: () => Promise.resolve({ data: { issueUpdate: { success: true } } }),
+      }
+
+      mockFetch
+        .mockResolvedValueOnce(issueResponse) // getIssueDetails → In Progress
+        .mockResolvedValueOnce(statesResponse) // getTeamStates
+        .mockResolvedValueOnce(updateResponse) // issueUpdate → In Progress
+        .mockResolvedValueOnce(issueResponse) // getIssueDetails → Todo rollback
+        .mockResolvedValueOnce(statesResponse) // getTeamStates
+        .mockRejectedValueOnce(new Error("rollback failed")) // issueUpdate → Todo FAILS
+
+      const { req, res } = makeSignedReq(payload, SECRET)
+      await handleWebhook(api, req, res)
+
+      expect(res.writeHead).toHaveBeenCalledWith(500, expect.any(Object))
+      // Should have logged the rollback failure
+      expect(mockLogger.warn).toHaveBeenCalledWith(expect.stringContaining("failed to rollback status"))
     })
   })
 
@@ -1246,6 +1339,217 @@ describe("handleWebhook", () => {
       expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
     })
 
+    it("rolls back issue state to Todo when subagent.run() throws after In Progress in handleCommentCreate", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi({ accessToken: "lin_test_token" })
+
+      const commentIssueId = `issue-cf-rollback-${uid}`
+      const issueData = {
+        id: commentIssueId,
+        identifier: "ENG-RB",
+        title: "Rollback Test",
+        description: "Test",
+        url: "https://linear.app/eng/issue/ENG-RB",
+        state: { name: "Todo", type: "unstarted" },
+        creator: null,
+        assignee: null,
+        labels: { nodes: [] },
+        team: { id: "team-001", key: "ENG", name: "Engineering" },
+        comments: { nodes: [] },
+        project: null,
+      }
+
+      mockSubagentRun.mockRejectedValueOnce(new Error("agent crashed"))
+
+      // 1) getIssueDetails (handleCommentCreate)
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ data: { issue: issueData } }),
+      })
+      // 2) getIssueDetails (updateIssueState internal)
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            data: { issue: { id: commentIssueId, team: { id: "team-001", key: "ENG", name: "Engineering" } } },
+          }),
+      })
+      // 3) getTeamStates
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            data: {
+              team: {
+                states: {
+                  nodes: [
+                    { id: "s-todo", name: "Todo" },
+                    { id: "s-ip", name: "In Progress" },
+                  ],
+                },
+              },
+            },
+          }),
+      })
+      // 4) issueUpdate → In Progress
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ data: { issueUpdate: { success: true } } }),
+      })
+      // 5) getIssueDetails (rollback)
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            data: { issue: { id: commentIssueId, team: { id: "team-001", key: "ENG", name: "Engineering" } } },
+          }),
+      })
+      // 6) getTeamStates (rollback)
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            data: {
+              team: {
+                states: {
+                  nodes: [
+                    { id: "s-todo", name: "Todo" },
+                    { id: "s-ip", name: "In Progress" },
+                  ],
+                },
+              },
+            },
+          }),
+      })
+      // 7) issueUpdate → Todo (rollback succeeds)
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ data: { issueUpdate: { success: true } } }),
+      })
+
+      const payload = {
+        type: "Comment",
+        action: "create",
+        createdAt: `2026-04-01T19:00:${String(uid++).padStart(2, "0")}.000Z`,
+        data: {
+          id: `comment-rollback-${uid}`,
+          body: "@Linus rollback test",
+          issue: { id: commentIssueId },
+        },
+      }
+      const { req, res } = makeSignedReq(payload, SECRET)
+      await handleWebhook(api, req, res)
+
+      expect(res.writeHead).toHaveBeenCalledWith(500, expect.any(Object))
+      expect(mockFetch).toHaveBeenCalledTimes(7)
+      // Rollback call (7th fetch) should target "Todo" state
+      const rollbackBody = JSON.parse(mockFetch.mock.calls[6][1].body)
+      expect(rollbackBody.variables.input.stateId).toBe("s-todo")
+    })
+
+    it("logs warning when rollback fails after subagent.run() throws in handleCommentCreate", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi({ accessToken: "lin_test_token" })
+
+      const commentIssueId = `issue-cf-rb-fail-${uid}`
+      const issueData = {
+        id: commentIssueId,
+        identifier: "ENG-RBF",
+        title: "Rollback Fail Test",
+        description: "Test",
+        url: "https://linear.app/eng/issue/ENG-RBF",
+        state: { name: "Todo", type: "unstarted" },
+        creator: null,
+        assignee: null,
+        labels: { nodes: [] },
+        team: { id: "team-001", key: "ENG", name: "Engineering" },
+        comments: { nodes: [] },
+        project: null,
+      }
+
+      mockSubagentRun.mockRejectedValueOnce(new Error("agent crashed"))
+
+      // 1) getIssueDetails (handleCommentCreate)
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ data: { issue: issueData } }),
+      })
+      // 2) getIssueDetails (updateIssueState internal)
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            data: { issue: { id: commentIssueId, team: { id: "team-001", key: "ENG", name: "Engineering" } } },
+          }),
+      })
+      // 3) getTeamStates
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            data: {
+              team: {
+                states: {
+                  nodes: [
+                    { id: "s-todo", name: "Todo" },
+                    { id: "s-ip", name: "In Progress" },
+                  ],
+                },
+              },
+            },
+          }),
+      })
+      // 4) issueUpdate → In Progress
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ data: { issueUpdate: { success: true } } }),
+      })
+      // 5) getIssueDetails (rollback)
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            data: { issue: { id: commentIssueId, team: { id: "team-001", key: "ENG", name: "Engineering" } } },
+          }),
+      })
+      // 6) getTeamStates (rollback)
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            data: {
+              team: {
+                states: {
+                  nodes: [
+                    { id: "s-todo", name: "Todo" },
+                    { id: "s-ip", name: "In Progress" },
+                  ],
+                },
+              },
+            },
+          }),
+      })
+      // 7) issueUpdate → Todo (rollback FAILS)
+      mockFetch.mockRejectedValueOnce(new Error("rollback failed"))
+
+      const payload = {
+        type: "Comment",
+        action: "create",
+        createdAt: `2026-04-01T20:00:${String(uid++).padStart(2, "0")}.000Z`,
+        data: {
+          id: `comment-rb-fail-${uid}`,
+          body: "@Linus rollback fail test",
+          issue: { id: commentIssueId },
+        },
+      }
+      const { req, res } = makeSignedReq(payload, SECRET)
+      await handleWebhook(api, req, res)
+
+      expect(res.writeHead).toHaveBeenCalledWith(500, expect.any(Object))
+      // Should have logged the rollback failure
+      expect(mockLogger.warn).toHaveBeenCalledWith(expect.stringContaining("failed to rollback status"))
+    })
+
     it("handleCommentCreate blocks when agent already running from created event (cross-type activeRuns)", async () => {
       const { handleWebhook } = await import("../webhook-handler.js")
       const api = makeApi({ accessToken: "lin_test_token" })
@@ -1398,6 +1702,22 @@ describe("handleWebhook", () => {
       await handleWebhook(api, req, res)
 
       expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
+    })
+
+    it("returns 200 for Issue type events (no-op handler)", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi()
+      const payload = {
+        type: "Issue",
+        action: "update",
+        createdAt: `2026-04-01T15:00:${String(uid++).padStart(2, "0")}.000Z`,
+      }
+      const { req, res } = makeSignedReq(payload, SECRET)
+
+      await handleWebhook(api, req, res)
+
+      expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
+      expect(mockSubagentRun).not.toHaveBeenCalled()
     })
   })
 

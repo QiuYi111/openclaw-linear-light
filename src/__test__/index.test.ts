@@ -37,6 +37,14 @@ vi.mock("node:crypto", () => ({
     })),
   })),
   timingSafeEqual: vi.fn(() => true),
+  randomBytes: vi.fn((size: number) => ({
+    toString: vi.fn(() => "a".repeat(size * 2)),
+  })),
+  createHash: vi.fn(() => ({
+    update: vi.fn(() => ({
+      digest: vi.fn(() => "mock-challenge"),
+    })),
+  })),
 }))
 
 // Mock fetch for Linear API calls
@@ -281,6 +289,73 @@ describe("onSubagentEnded", () => {
   })
 })
 
+describe("registered route handlers", () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ data: { teams: { nodes: [] } } }),
+    })
+  })
+
+  it("invokes handleOAuthCallback via registered route handler", async () => {
+    const mod = await import("../../index.js")
+    const api = makeApi()
+    mod.default(api)
+
+    // Find the callback route handler
+    const callbackRoute = api.registerHttpRoute.mock.calls.find(
+      (call: any) => call[0].path === "/linear-light/oauth/callback",
+    )
+    expect(callbackRoute).toBeDefined()
+
+    const req = { url: "/linear-light/oauth/callback?error=access_denied", headers: { host: "localhost" } }
+    const res = { writeHead: vi.fn(), end: vi.fn() }
+    await callbackRoute[0].handler(req, res)
+
+    expect(res.writeHead).toHaveBeenCalledWith(400, expect.any(Object))
+  })
+
+  it("invokes handleOAuthInit via registered route handler", async () => {
+    const mod = await import("../../index.js")
+    const api = makeApi({ linearClientId: "test-client-id", linearClientSecret: "test-client-secret" })
+    mod.default(api)
+
+    // Find the init route handler
+    const initRoute = api.registerHttpRoute.mock.calls.find((call: any) => call[0].path === "/linear-light/oauth/init")
+    expect(initRoute).toBeDefined()
+
+    const req = { url: "/linear-light/oauth/init", headers: { host: "localhost", "x-forwarded-proto": "https" } }
+    const res = { writeHead: vi.fn(), end: vi.fn() }
+    await initRoute[0].handler(req, res)
+
+    expect(res.writeHead).toHaveBeenCalledWith(302, expect.any(Object))
+  })
+
+  it("invokes handleWebhook via registered route handler", async () => {
+    const mod = await import("../../index.js")
+    const api = makeApi()
+    mod.default(api)
+
+    // Find the webhook route handler
+    const webhookRoute = api.registerHttpRoute.mock.calls.find((call: any) => call[0].path === "/linear-light/webhook")
+    expect(webhookRoute).toBeDefined()
+
+    // Missing signature → 401
+    const req = {
+      url: "/linear-light/webhook",
+      headers: {},
+      on: vi.fn((event: string, cb: (...args: any[]) => void) => {
+        if (event === "end") cb()
+      }),
+    }
+    const res = { writeHead: vi.fn(), end: vi.fn() }
+    await webhookRoute[0].handler(req, res)
+
+    expect(res.writeHead).toHaveBeenCalledWith(401, expect.any(Object))
+  })
+})
+
 describe("tools", () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -465,6 +540,41 @@ describe("tools", () => {
     agentSessionMap.delete("issue-err-1")
   })
 
+  it("linear_comment handles emitActivity failure gracefully on success path (catch block)", async () => {
+    const { agentSessionMap } = await import("../../src/webhook-handler.js")
+    agentSessionMap.set("issue-emit-fail-1", "sess-emit-fail-1")
+
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            data: { commentCreate: { success: true, comment: { id: "c-emit-fail" } } },
+          }),
+      })
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        text: () => Promise.resolve("Activity emit failed"),
+      })
+
+    const mod = await import("../../index.js")
+    const api = makeApi()
+    mod.default(api)
+
+    const commentTool = api.registerTool.mock.calls.find((call: any) => call[0].name === "linear_comment")?.[0]
+    const result = await commentTool.execute("tc-emit-fail", {
+      issueId: "issue-emit-fail-1",
+      body: "Activity fail test",
+    })
+
+    // Comment should still succeed even though emitActivity failed
+    expect(result.content[0].text).toContain("issue-emit-fail-1")
+    expect(mockFetch).toHaveBeenCalledTimes(2) // createComment + emitActivity failure
+    expect(mockLogger.warn).toHaveBeenCalledWith(expect.stringContaining("failed to emit activity"))
+    agentSessionMap.delete("issue-emit-fail-1")
+  })
+
   it("linear_update_status error path returns failure", async () => {
     mockFetch.mockResolvedValue({
       ok: false,
@@ -625,5 +735,132 @@ describe("tools", () => {
     // Status update should happen but notification should be skipped
     expect(mockFetch).toHaveBeenCalled()
     expect(mockSendMessageTelegram).not.toHaveBeenCalled()
+  })
+
+  it("uses default sessionPrefix 'linear:' when not configured in onSubagentEnded", async () => {
+    const mod = await import("../../index.js")
+    const api = makeApi({ sessionPrefix: undefined })
+    mod.default(api)
+
+    mockStatusUpdateFlow()
+    // getIssueDetails for notification
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () =>
+        Promise.resolve({
+          data: {
+            issue: {
+              id: "issue-uuid-001",
+              identifier: "ENG-42",
+              title: "Test Issue",
+              url: "https://linear.app/eng/issue/ENG-42",
+            },
+          },
+        }),
+    })
+
+    const hook = api.registerHook.mock.calls[0][1]
+    // Without sessionPrefix config, default "linear:" is used
+    await hook({ sessionKey: "linear:issue-uuid-001", success: true })
+
+    expect(mockSendMessageTelegram).toHaveBeenCalled()
+  })
+
+  it("onSubagentEnded returns early when sessionKey equals prefix (empty issueId)", async () => {
+    const mod = await import("../../index.js")
+    const api = makeApi({ sessionPrefix: "custom:" })
+    mod.default(api)
+
+    const hook = api.registerHook.mock.calls[0][1]
+    // sessionKey is exactly the prefix — no issueId after slicing
+    await hook({ sessionKey: "custom:", success: true })
+
+    expect(mockFetch).not.toHaveBeenCalled()
+    expect(mockSendMessageTelegram).not.toHaveBeenCalled()
+  })
+
+  it("onSubagentEnded skips notification when channel exists but has no sendMessageTelegram", async () => {
+    const mod = await import("../../index.js")
+    const api = makeApi()
+    api.runtime.channel = { sendMessage: vi.fn() } as any // no sendMessageTelegram
+    mod.default(api)
+
+    mockStatusUpdateFlow()
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () =>
+        Promise.resolve({
+          data: {
+            issue: {
+              id: "issue-uuid-001",
+              identifier: "ENG-42",
+              title: "Test Issue",
+              url: "https://linear.app/eng/issue/ENG-42",
+            },
+          },
+        }),
+    })
+
+    const hook = api.registerHook.mock.calls[0][1]
+    await hook({ sessionKey: "linear:issue-uuid-001", success: true })
+
+    // Status update happened, but notification was skipped (no sendMessageTelegram)
+    expect(mockFetch).toHaveBeenCalled()
+    expect(mockSendMessageTelegram).not.toHaveBeenCalled()
+  })
+
+  it("onSubagentEnded outer catch triggers when logger.warn throws inside notification catch", async () => {
+    // The outer catch at line 273 is reached when an error propagates
+    // out of the inner try/catch blocks. We simulate this by making
+    // logger.warn throw inside the notification error handler.
+    const throwingLogger = {
+      info: vi.fn(),
+      warn: vi.fn(() => {
+        throw new Error("logger exploded")
+      }),
+      error: vi.fn(),
+      debug: vi.fn(),
+    }
+
+    mockFetch
+      // getIssueDetails for updateIssueState
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            data: { issue: { id: "issue-1", team: { id: "team-1" } } },
+          }),
+      })
+      // getTeamStates
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            data: { team: { states: { nodes: [{ id: "s-done", name: "Done" }] } } },
+          }),
+      })
+      // issueUpdate
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ data: { issueUpdate: { success: true } } }),
+      })
+      // getIssueDetails for notification — FAILS
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        text: () => Promise.resolve("Server Error"),
+      })
+
+    const mod = await import("../../index.js")
+    const api = makeApi()
+    api.logger = throwingLogger
+    mod.default(api)
+
+    const hook = api.registerHook.mock.calls[0][1]
+    // Should NOT throw even when inner catch's logger.warn propagates
+    await hook({ sessionKey: "linear:issue-1", success: true })
+
+    // The outer catch should have logged the error
+    expect(throwingLogger.error).toHaveBeenCalledWith(expect.stringContaining("onSubagentEnded failed"))
   })
 })
