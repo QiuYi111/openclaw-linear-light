@@ -368,6 +368,148 @@ describe("handleWebhook", () => {
   })
 
   // -----------------------------------------------------------------------
+  describe("malformed payload type guards", () => {
+    // -----------------------------------------------------------------------
+
+    it("handleSessionCreated skips when issue.id is missing", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi()
+      const n = uid++
+      const payload = makeAgentSessionCreated({
+        createdAt: `2099-07-01T00:00:${String(n).padStart(2, "0")}.000Z`,
+        agentSession: {
+          id: `sess-malformed-${n}`,
+          issue: {
+            id: undefined,
+            identifier: `ENG-${n + 100}`,
+            title: `Malformed ${n}`,
+            description: "Missing id",
+            url: "https://linear.app/eng/issue/ENG-0",
+            team: { id: "team-001", key: "ENG", name: "Engineering" },
+          },
+        },
+      })
+      const { req, res } = makeSignedReq(payload, SECRET)
+
+      await handleWebhook(api, req, res)
+
+      expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
+      expect(mockSubagentRun).not.toHaveBeenCalled()
+      expect(mockLogger.warn).toHaveBeenCalledWith(expect.stringContaining("malformed session payload"))
+    })
+
+    it("handleSessionCreated skips when issue.title is missing", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi()
+      const n = uid++
+      const payload = makeAgentSessionCreated({
+        createdAt: `2099-07-02T00:00:${String(n).padStart(2, "0")}.000Z`,
+        agentSession: {
+          id: `sess-malformed-${n}`,
+          issue: {
+            id: `issue-malformed-${n}`,
+            identifier: `ENG-${n + 100}`,
+            title: undefined,
+            description: "Missing title",
+            url: "https://linear.app/eng/issue/ENG-0",
+            team: { id: "team-001", key: "ENG", name: "Engineering" },
+          },
+        },
+      })
+      const { req, res } = makeSignedReq(payload, SECRET)
+
+      await handleWebhook(api, req, res)
+
+      expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
+      expect(mockSubagentRun).not.toHaveBeenCalled()
+      expect(mockLogger.warn).toHaveBeenCalledWith(expect.stringContaining("malformed session payload"))
+    })
+
+    it("handleSessionCreated skips when issue.identifier is missing", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi()
+      const n = uid++
+      const payload = makeAgentSessionCreated({
+        createdAt: `2099-07-03T00:00:${String(n).padStart(2, "0")}.000Z`,
+        agentSession: {
+          id: `sess-malformed-${n}`,
+          issue: {
+            id: `issue-malformed-${n}`,
+            identifier: undefined,
+            title: `Malformed ${n}`,
+            description: "Missing identifier",
+            url: "https://linear.app/eng/issue/ENG-0",
+            team: { id: "team-001", key: "ENG", name: "Engineering" },
+          },
+        },
+      })
+      const { req, res } = makeSignedReq(payload, SECRET)
+
+      await handleWebhook(api, req, res)
+
+      expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
+      expect(mockSubagentRun).not.toHaveBeenCalled()
+      expect(mockLogger.warn).toHaveBeenCalledWith(expect.stringContaining("malformed session payload"))
+    })
+
+    it("handleSessionPrompted skips when issue.id is missing", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi()
+      const n = uid++
+      const payload = makeAgentSessionPrompted({
+        createdAt: `2099-08-01T00:00:${String(n).padStart(2, "0")}.000Z`,
+        agentSession: {
+          id: `sess-prompt-malformed-${n}`,
+          issue: {
+            id: undefined,
+            identifier: `ENG-${n + 100}`,
+            url: `https://linear.app/eng/issue/ENG-${n + 100}`,
+          },
+        },
+        agentActivity: {
+          content: { body: "follow up" },
+          signal: null,
+        },
+      })
+      const { req, res } = makeSignedReq(payload, SECRET)
+
+      await handleWebhook(api, req, res)
+
+      expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
+      expect(mockSubagentRun).not.toHaveBeenCalled()
+      expect(mockLogger.warn).toHaveBeenCalledWith(expect.stringContaining("malformed prompted payload"))
+    })
+
+    it("handleSessionPrompted skips when issue.identifier is missing", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi()
+      const n = uid++
+      const payload = makeAgentSessionPrompted({
+        createdAt: `2099-08-02T00:00:${String(n).padStart(2, "0")}.000Z`,
+        agentSession: {
+          id: `sess-prompt-malformed-${n}`,
+          issue: {
+            id: `issue-prompt-malformed-${n}`,
+            identifier: undefined,
+            url: `https://linear.app/eng/issue/ENG-${n + 100}`,
+          },
+        },
+        agentActivity: {
+          content: { body: "follow up" },
+          signal: null,
+        },
+      })
+      const { req, res } = makeSignedReq(payload, SECRET)
+
+      await handleWebhook(api, req, res)
+
+      expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
+      expect(mockSubagentRun).not.toHaveBeenCalled()
+      expect(mockLogger.warn).toHaveBeenCalledWith(expect.stringContaining("malformed prompted payload"))
+    })
+  })
+
+  // -----------------------------------------------------------------------
   describe("webhook processing errors", () => {
     // -----------------------------------------------------------------------
 
