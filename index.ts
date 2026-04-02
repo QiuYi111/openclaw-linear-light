@@ -80,7 +80,7 @@ export default function register(api: OpenClawPluginApi) {
 // Tools
 // ---------------------------------------------------------------------------
 
-function makeLinearApi(config: Record<string, unknown> | undefined) {
+function makeLinearApi(config: Record<string, unknown> | undefined, api: OpenClawPluginApi) {
   const tokenInfo = resolveLinearToken(config)
   if (!tokenInfo.accessToken) return null
   return new LinearAgentApi(tokenInfo.accessToken, {
@@ -89,12 +89,13 @@ function makeLinearApi(config: Record<string, unknown> | undefined) {
     clientId: (config?.linearClientId as string) || process.env.LINEAR_CLIENT_ID,
     clientSecret: (config?.linearClientSecret as string) || process.env.LINEAR_CLIENT_SECRET,
     source: tokenInfo.source,
+    logger: api.logger,
   })
 }
 
 function createLinearTools(api: OpenClawPluginApi): any[] {
   const config = api.pluginConfig as Record<string, unknown> | undefined
-  const linearApi = makeLinearApi(config)
+  const linearApi = makeLinearApi(config, api)
   if (!linearApi) return []
 
   return [
@@ -226,6 +227,7 @@ async function onSubagentEnded(api: OpenClawPluginApi, event: any): Promise<void
     clientId: (config?.linearClientId as string) || process.env.LINEAR_CLIENT_ID,
     clientSecret: (config?.linearClientSecret as string) || process.env.LINEAR_CLIENT_SECRET,
     source: tokenInfo.source,
+    logger: api.logger,
   })
 
   const success = event?.success !== false

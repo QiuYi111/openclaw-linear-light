@@ -18,6 +18,17 @@ vi.mock("node:fs", () => ({
   renameSync: mockRenameSync,
 }))
 
+const mockLogger = {
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+  debug: vi.fn(),
+}
+
+function makeApi(overrides?: Partial<typeof mockLogger>) {
+  return { ...mockLogger, ...overrides } as typeof mockLogger
+}
+
 describe("LinearAgentApi", () => {
   beforeEach(() => {
     vi.resetAllMocks()
@@ -63,9 +74,9 @@ describe("LinearAgentApi", () => {
   describe("GraphQL error handling", () => {
     it("throws on GraphQL errors without data", async () => {
       const { LinearAgentApi } = await import("../api/linear-api.js")
-      const api = new LinearAgentApi("lin_api_test")
+      const logger = makeApi()
+      const api = new LinearAgentApi("lin_api_test", { logger })
 
-      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {})
       mockFetch.mockResolvedValue({
         ok: true,
         json: () =>
@@ -75,14 +86,14 @@ describe("LinearAgentApi", () => {
       })
 
       await expect(api.getTeams()).rejects.toThrow("Linear GraphQL")
-      errorSpy.mockRestore()
+      expect(logger.error).toHaveBeenCalledWith(expect.stringContaining("GraphQL errors"))
     })
 
     it("logs full GraphQL error details but throws sanitized message without schema info", async () => {
       const { LinearAgentApi } = await import("../api/linear-api.js")
-      const api = new LinearAgentApi("lin_api_test")
+      const logger = makeApi()
+      const api = new LinearAgentApi("lin_api_test", { logger })
 
-      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {})
       mockFetch.mockResolvedValue({
         ok: true,
         json: () =>
@@ -101,16 +112,15 @@ describe("LinearAgentApi", () => {
       // Thrown message must not expose schema details or user IDs
       expect(err.message).not.toContain("secretField")
       expect(err.message).not.toContain("user-secret-id-123")
-      // Full details must be logged to server console for debugging
-      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("secretField"))
-      errorSpy.mockRestore()
+      // Full details must be logged via logger for debugging
+      expect(logger.error).toHaveBeenCalledWith(expect.stringContaining("secretField"))
     })
 
     it("returns data even when partial errors present", async () => {
       const { LinearAgentApi } = await import("../api/linear-api.js")
-      const api = new LinearAgentApi("lin_api_test")
+      const logger = makeApi()
+      const api = new LinearAgentApi("lin_api_test", { logger })
 
-      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {})
       mockFetch.mockResolvedValue({
         ok: true,
         json: () =>
@@ -123,15 +133,14 @@ describe("LinearAgentApi", () => {
       const result = await api.getTeams()
       expect(result).toHaveLength(1)
       // Partial errors should be logged as warnings
-      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("partial errors"))
-      warnSpy.mockRestore()
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("partial errors"))
     })
 
     it("throws on HTTP error with sanitized message", async () => {
       const { LinearAgentApi } = await import("../api/linear-api.js")
-      const api = new LinearAgentApi("lin_api_test")
+      const logger = makeApi()
+      const api = new LinearAgentApi("lin_api_test", { logger })
 
-      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {})
       mockFetch.mockResolvedValue({
         ok: false,
         status: 500,
@@ -139,9 +148,8 @@ describe("LinearAgentApi", () => {
       })
 
       await expect(api.getTeams()).rejects.toThrow("Linear API request failed (500)")
-      // Full response body must be logged server-side, not exposed in thrown message
-      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("secret info"))
-      errorSpy.mockRestore()
+      // Full response body must be logged via logger, not exposed in thrown message
+      expect(logger.error).toHaveBeenCalledWith(expect.stringContaining("secret info"))
     })
   })
 
@@ -254,14 +262,14 @@ describe("LinearAgentApi", () => {
 
     it("returns partial data when retry succeeds with partial GraphQL errors", async () => {
       const { LinearAgentApi } = await import("../api/linear-api.js")
+      const logger = makeApi()
       const api = new LinearAgentApi("expired-token", {
         refreshToken: "refresh-123",
         clientId: "cid",
         clientSecret: "csec",
         expiresAt: Date.now() + 3600_000,
+        logger,
       })
-
-      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {})
 
       // First call: 401
       mockFetch.mockResolvedValueOnce({ ok: false, status: 401 })
@@ -287,20 +295,19 @@ describe("LinearAgentApi", () => {
 
       const result = await api.getTeams()
       expect(result).toEqual([{ id: "1", name: "Eng", key: "ENG" }])
-      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("partial errors"))
-      warnSpy.mockRestore()
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("partial errors"))
     })
 
     it("throws when retry after refresh also returns 401", async () => {
       const { LinearAgentApi } = await import("../api/linear-api.js")
+      const logger = makeApi()
       const api = new LinearAgentApi("expired-token", {
         refreshToken: "refresh-123",
         clientId: "cid",
         clientSecret: "csec",
         expiresAt: Date.now() + 3600_000,
+        logger,
       })
-
-      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {})
 
       // First call: 401
       mockFetch.mockResolvedValueOnce({ ok: false, status: 401 })
@@ -322,7 +329,7 @@ describe("LinearAgentApi", () => {
       })
 
       await expect(api.getTeams()).rejects.toThrow("Linear API request failed (401)")
-      errorSpy.mockRestore()
+      expect(logger.error).toHaveBeenCalled()
     })
   })
 
