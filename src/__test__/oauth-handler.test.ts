@@ -265,4 +265,36 @@ describe("handleOAuthCallback", () => {
     expect(res.statusCode).toBe(500)
     expect(res.body).toContain("Internal Error")
   })
+
+  it("uses the stored redirect URI from init, not the callback request headers", async () => {
+    const { handleOAuthCallback, generateAuthorizationURL } = await import("../oauth-handler.js")
+
+    // Init with one host
+    generateAuthorizationURL("test-client-id", "https://original-host:8080/linear-light/oauth/callback")
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () =>
+        Promise.resolve({
+          access_token: "tok",
+          refresh_token: "ref",
+          expires_in: 3600,
+        }),
+    })
+
+    const api = makeApi()
+    // Callback arrives via a different proxy/host — should still use the stored URI
+    const req = makeReq("/linear-light/oauth/callback?code=test-code&state=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", {
+      host: "different-host:9090",
+      "x-forwarded-proto": "http",
+    })
+    const res = makeRes()
+
+    await handleOAuthCallback(api, req, res)
+
+    expect(res.statusCode).toBe(200)
+    // Verify the token exchange used the original redirect URI
+    const fetchBody = mockFetch.mock.calls[0][1]?.body as URLSearchParams
+    expect(fetchBody.get("redirect_uri")).toBe("https://original-host:8080/linear-light/oauth/callback")
+  })
 })

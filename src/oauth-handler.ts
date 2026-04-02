@@ -16,7 +16,7 @@ const LINEAR_TOKEN_URL = "https://api.linear.app/oauth/token"
 const DEFAULT_SCOPES = "read,write"
 
 // In-flight PKCE state for CSRF protection
-const pendingStates = new Map<string, { codeVerifier: string; expiresAt: number }>()
+const pendingStates = new Map<string, { codeVerifier: string; redirectUri: string; expiresAt: number }>()
 const STATE_TTL_MS = 600_000 // 10 minutes
 
 function cleanupExpiredStates(): void {
@@ -64,9 +64,10 @@ export function generateAuthorizationURL(
   const state = opts?.state || randomBytes(16).toString("hex")
   const scopes = opts?.scopes || DEFAULT_SCOPES
 
-  // Store PKCE verifier for callback validation
+  // Store PKCE verifier and redirect URI for callback validation
   pendingStates.set(state, {
     codeVerifier,
+    redirectUri,
     expiresAt: Date.now() + STATE_TTL_MS,
   })
 
@@ -146,6 +147,7 @@ export async function handleOAuthCallback(api: OpenClawPluginApi, req: any, res:
     res.end("<h1>OAuth Error</h1><p>Invalid or expired state parameter.</p>")
     return
   }
+  const { codeVerifier, redirectUri } = pending
   pendingStates.delete(state)
 
   const clientId = (config?.linearClientId as string) || process.env.LINEAR_CLIENT_ID
@@ -157,11 +159,6 @@ export async function handleOAuthCallback(api: OpenClawPluginApi, req: any, res:
     res.end("<h1>Configuration Error</h1><p>linearClientId and linearClientSecret must be configured.</p>")
     return
   }
-
-  // Build redirect URI (must match the one used in init)
-  const proto = req.headers["x-forwarded-proto"] || "https"
-  const host = req.headers.host || "localhost"
-  const redirectUri = `${proto}://${host}/linear-light/oauth/callback`
 
   // Exchange code for tokens
   try {
@@ -177,7 +174,7 @@ export async function handleOAuthCallback(api: OpenClawPluginApi, req: any, res:
         redirect_uri: redirectUri,
         client_id: clientId,
         client_secret: clientSecret,
-        code_verifier: pending.codeVerifier,
+        code_verifier: codeVerifier,
       }),
     })
 
