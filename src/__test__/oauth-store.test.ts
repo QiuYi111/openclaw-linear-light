@@ -65,7 +65,10 @@ describe("oauth-store", () => {
 
       writeStoredToken({ accessToken: "at-new" })
 
-      expect(mockMkdirSync).toHaveBeenCalledWith(expect.stringContaining("linear-light"), { recursive: true })
+      expect(mockMkdirSync).toHaveBeenCalledWith(expect.stringContaining("linear-light"), {
+        recursive: true,
+        mode: 0o700,
+      })
     })
 
     it("writes token atomically (tmp + rename)", async () => {
@@ -79,9 +82,15 @@ describe("oauth-store", () => {
       })
 
       expect(mockWriteFileSync).toHaveBeenCalledTimes(1)
-      const [tmpPath, content] = mockWriteFileSync.mock.calls[0]
+      const [tmpPath, content, options] = mockWriteFileSync.mock.calls[0] as [
+        string,
+        string,
+        { encoding: string; mode: number },
+      ]
       expect(tmpPath).toMatch(/\.tmp$/)
       expect(JSON.parse(content).accessToken).toBe("at-new")
+      expect(options.mode).toBe(0o600)
+      expect(options.encoding).toBe("utf8")
       expect(mockRenameSync).toHaveBeenCalledWith(tmpPath, expect.stringContaining("token.json"))
     })
 
