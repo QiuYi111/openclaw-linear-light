@@ -11,9 +11,11 @@ vi.stubGlobal("fetch", mockFetch)
 // Mock fs for resolveLinearToken
 const mockReadFileSync = vi.fn()
 const mockWriteFileSync = vi.fn()
+const mockRenameSync = vi.fn()
 vi.mock("node:fs", () => ({
   readFileSync: mockReadFileSync,
   writeFileSync: mockWriteFileSync,
+  renameSync: mockRenameSync,
 }))
 
 describe("LinearAgentApi", () => {
@@ -63,6 +65,7 @@ describe("LinearAgentApi", () => {
       const { LinearAgentApi } = await import("../api/linear-api.js")
       const api = new LinearAgentApi("lin_api_test")
 
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {})
       mockFetch.mockResolvedValue({
         ok: true,
         json: () =>
@@ -72,6 +75,35 @@ describe("LinearAgentApi", () => {
       })
 
       await expect(api.getTeams()).rejects.toThrow("Linear GraphQL")
+      errorSpy.mockRestore()
+    })
+
+    it("logs full GraphQL error details but throws sanitized message without schema info", async () => {
+      const { LinearAgentApi } = await import("../api/linear-api.js")
+      const api = new LinearAgentApi("lin_api_test")
+
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {})
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            errors: [
+              {
+                message: "Field 'secretField' does not exist on type 'User'",
+                extensions: { userId: "user-secret-id-123" },
+              },
+            ],
+          }),
+      })
+
+      const err = await api.getTeams().catch((e) => e)
+
+      // Thrown message must not expose schema details or user IDs
+      expect(err.message).not.toContain("secretField")
+      expect(err.message).not.toContain("user-secret-id-123")
+      // Full details must be logged to server console for debugging
+      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("secretField"))
+      errorSpy.mockRestore()
     })
 
     it("returns data even when partial errors present", async () => {
@@ -282,12 +314,16 @@ describe("LinearAgentApi", () => {
 
       await api.getTeams()
 
-      // writeFileSync should have been called to persist the refreshed token
+      // writeFileSync should write to a temp file, then renameSync for atomicity
       expect(mockWriteFileSync).toHaveBeenCalled()
+      const writtenPath = mockWriteFileSync.mock.calls[0][0]
+      expect(writtenPath).toMatch(/\.tmp$/)
       const written = JSON.parse(mockWriteFileSync.mock.calls[0][1])
       const ws = written.linearWorkspaces.default
       expect(ws.linearToken).toBe("new-access-token")
       expect(ws.linearRefreshToken).toBe("new-refresh-token")
+      // rename from temp → final path for atomic persistence
+      expect(mockRenameSync).toHaveBeenCalledWith(writtenPath, expect.stringMatching(/config\.json$/))
     })
   })
 

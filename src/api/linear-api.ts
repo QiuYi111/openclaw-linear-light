@@ -5,7 +5,7 @@
  * Borrowed from openclaw-linear-plugin (calltelemetry/openclaw-linear-plugin).
  */
 
-import { readFileSync, writeFileSync } from "node:fs"
+import { readFileSync, renameSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
 
@@ -159,7 +159,9 @@ export class LinearAgentApi {
         workspaces[firstKey].linearTokenExpiresAt = this.expiresAt
       }
 
-      writeFileSync(CYRUS_CONFIG_PATH, JSON.stringify(store, null, 2), "utf8")
+      const tmpPath = `${CYRUS_CONFIG_PATH}.tmp`
+      writeFileSync(tmpPath, JSON.stringify(store, null, 2), "utf8")
+      renameSync(tmpPath, CYRUS_CONFIG_PATH)
     } catch {
       // Best-effort persistence
     }
@@ -203,10 +205,11 @@ export class LinearAgentApi {
 
       const payload = await retry.json()
       if (payload.errors?.length) {
-        console.warn(`Linear GraphQL partial errors: ${JSON.stringify(payload.errors)}`)
         if (!payload.data) {
-          throw new Error(`Linear GraphQL: ${JSON.stringify(payload.errors)}`)
+          console.error(`Linear GraphQL errors: ${JSON.stringify(payload.errors)}`)
+          throw new Error("Linear GraphQL request failed (see server logs)")
         }
+        console.warn(`Linear GraphQL partial errors: ${JSON.stringify(payload.errors)}`)
       }
 
       return payload.data as T
@@ -219,10 +222,11 @@ export class LinearAgentApi {
 
     const payload = await res.json()
     if (payload.errors?.length) {
-      console.warn(`Linear GraphQL partial errors: ${JSON.stringify(payload.errors)}`)
       if (!payload.data) {
-        throw new Error(`Linear GraphQL: ${JSON.stringify(payload.errors)}`)
+        console.error(`Linear GraphQL errors: ${JSON.stringify(payload.errors)}`)
+        throw new Error("Linear GraphQL request failed (see server logs)")
       }
+      console.warn(`Linear GraphQL partial errors: ${JSON.stringify(payload.errors)}`)
     }
 
     return payload.data as T

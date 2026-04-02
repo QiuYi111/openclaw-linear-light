@@ -264,18 +264,23 @@ async function handleSessionCreated(
 
   // Resolve Linear API for status update and activity emission
   const tokenInfo = resolveLinearToken(config)
+  const apiOpts = {
+    refreshToken: tokenInfo.refreshToken,
+    expiresAt: tokenInfo.expiresAt,
+    clientId: (config?.linearClientId as string) || process.env.LINEAR_CLIENT_ID,
+    clientSecret: (config?.linearClientSecret as string) || process.env.LINEAR_CLIENT_SECRET,
+    source: tokenInfo.source,
+  }
 
   // Update issue status to In Progress
+  let rollbackApi: LinearAgentApi | null = null
+  let movedToInProgress = false
   if (config?.autoInProgress !== false && tokenInfo.accessToken) {
     try {
-      const linearApi = new LinearAgentApi(tokenInfo.accessToken, {
-        refreshToken: tokenInfo.refreshToken,
-        expiresAt: tokenInfo.expiresAt,
-        clientId: (config?.linearClientId as string) || process.env.LINEAR_CLIENT_ID,
-        clientSecret: (config?.linearClientSecret as string) || process.env.LINEAR_CLIENT_SECRET,
-        source: tokenInfo.source,
-      })
+      const linearApi = new LinearAgentApi(tokenInfo.accessToken, apiOpts)
       await linearApi.updateIssueState(issueId, "In Progress")
+      rollbackApi = linearApi
+      movedToInProgress = true
       api.logger.info(`Linear Light: ${issue.identifier} → In Progress`)
     } catch (err) {
       api.logger.warn(`Linear Light: failed to update status: ${err}`)
@@ -297,21 +302,29 @@ async function handleSessionCreated(
   ].join("\n")
 
   // Dispatch to OpenClaw agent with session key for continuity
-  await api.runtime.subagent.run({
-    message,
-    sessionKey,
-  })
+  try {
+    await api.runtime.subagent.run({
+      message,
+      sessionKey,
+    })
+  } catch (err) {
+    clearActiveRun(sessionKey)
+    agentSessionMap.delete(issueId)
+    if (movedToInProgress && rollbackApi) {
+      try {
+        await rollbackApi.updateIssueState(issueId, "Todo")
+        api.logger.info(`Linear Light: ${issue.identifier} rolled back → Todo`)
+      } catch (rollbackErr) {
+        api.logger.warn(`Linear Light: failed to rollback status: ${rollbackErr}`)
+      }
+    }
+    throw err
+  }
 
   // Emit initial activity so Linear shows the session as active
   if (agentSessionId && tokenInfo.accessToken) {
     try {
-      const linearApi = new LinearAgentApi(tokenInfo.accessToken, {
-        refreshToken: tokenInfo.refreshToken,
-        expiresAt: tokenInfo.expiresAt,
-        clientId: (config?.linearClientId as string) || process.env.LINEAR_CLIENT_ID,
-        clientSecret: (config?.linearClientSecret as string) || process.env.LINEAR_CLIENT_SECRET,
-        source: tokenInfo.source,
-      })
+      const linearApi = new LinearAgentApi(tokenInfo.accessToken, apiOpts)
       await linearApi.emitActivity(agentSessionId, {
         type: "thought",
         body: `Starting work on ${issue.identifier}: ${issue.title}`,
@@ -349,6 +362,13 @@ async function handleSessionPrompted(
   const sessionPrefix = (config?.sessionPrefix as string) || "linear:"
   const sessionKey = `${sessionPrefix}${issueId}`
 
+  // Guard: skip if an agent is already running for this issue
+  if (activeRuns.has(sessionKey)) {
+    api.logger.info(`Linear Light: agent already running for ${session.issue.identifier}, skipping follow-up`)
+    return
+  }
+  activeRuns.add(sessionKey)
+
   // Ensure agent session ID is available for activity emission
   const agentSessionId = session.id as string | undefined
   if (agentSessionId) {
@@ -359,10 +379,16 @@ async function handleSessionPrompted(
 
   const message = [`[Linear ${session.issue.identifier} follow-up]`, prompt].join("\n")
 
-  await api.runtime.subagent.run({
-    message,
-    sessionKey,
-  })
+  try {
+    await api.runtime.subagent.run({
+      message,
+      sessionKey,
+    })
+  } catch (err) {
+    clearActiveRun(sessionKey)
+    agentSessionMap.delete(issueId)
+    throw err
+  }
 
   api.logger.info(`Linear Light: follow-up dispatched for ${session.issue.identifier}`)
 }
@@ -392,12 +418,20 @@ async function handleCommentCreate(
   const sessionPrefix = (config?.sessionPrefix as string) || "linear:"
   const sessionKey = `${sessionPrefix}${issueId}`
 
+  // Guard: skip if an agent is already running for this issue
+  if (activeRuns.has(sessionKey)) {
+    api.logger.info(`Linear Light: agent already running for issue ${issueId}, skipping`)
+    return
+  }
+  activeRuns.add(sessionKey)
+
   api.logger.info(`Linear Light: comment trigger detected (fallback path) for issue ${issueId}`)
 
   // Resolve Linear API to fetch full issue details and update status
   const tokenInfo = resolveLinearToken(config)
   if (!tokenInfo.accessToken) {
     api.logger.warn("Linear Light: comment fallback triggered but no Linear API token available")
+    clearActiveRun(sessionKey)
     return
   }
 
@@ -414,13 +448,16 @@ async function handleCommentCreate(
     issue = await linearApi.getIssueDetails(issueId)
   } catch (err) {
     api.logger.error(`Linear Light: failed to fetch issue ${issueId}: ${err}`)
+    clearActiveRun(sessionKey)
     return
   }
 
   // Update issue status to In Progress
+  let movedToInProgress = false
   if (config?.autoInProgress !== false) {
     try {
       await linearApi.updateIssueState(issueId, "In Progress")
+      movedToInProgress = true
       api.logger.info(`Linear Light: ${issue.identifier} → In Progress`)
     } catch (err) {
       api.logger.warn(`Linear Light: failed to update status: ${err}`)
@@ -442,10 +479,23 @@ async function handleCommentCreate(
   ].join("\n")
 
   // Dispatch to OpenClaw agent with session key for continuity
-  await api.runtime.subagent.run({
-    message,
-    sessionKey,
-  })
+  try {
+    await api.runtime.subagent.run({
+      message,
+      sessionKey,
+    })
+  } catch (err) {
+    clearActiveRun(sessionKey)
+    if (movedToInProgress) {
+      try {
+        await linearApi.updateIssueState(issueId, "Todo")
+        api.logger.info(`Linear Light: ${issue.identifier} rolled back → Todo`)
+      } catch (rollbackErr) {
+        api.logger.warn(`Linear Light: failed to rollback status: ${rollbackErr}`)
+      }
+    }
+    throw err
+  }
 
   api.logger.info(`Linear Light: dispatched agent for ${issue.identifier} (comment fallback)`)
 }

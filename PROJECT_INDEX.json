@@ -1,0 +1,114 @@
+{
+  "project_name": "openclaw-linear-light",
+  "generated": "2026-04-01",
+  "entry_points": {
+    "cli": {
+      "path": "src/linear_light/cli.py",
+      "description": "Command-line interface for OpenClaw linear light tool",
+      "main_function": "main"
+    },
+    "api": {
+      "path": "src/linear_light/linear_light.py",
+      "description": "Main functionality module with create_linear_light() function",
+      "main_function": "create_linear_light"
+    },
+    "plugin": {
+      "path": "3rdparty/openclaw-linear-plugin/",
+      "description": "OpenClaw plugin interface"
+    }
+  },
+  "core_modules": {
+    "linear_light": {
+      "path": "src/linear_light/",
+      "exports": ["create_linear_light", "LinearLight"],
+      "purpose": "Main implementation for creating linear light objects with OpenClaw"
+    },
+    "cli": {
+      "path": "src/linear_light/cli.py",
+      "exports": ["main", "create_parser"],
+      "purpose": "Command-line interface with argument parsing and execution"
+    },
+    "probe": {
+      "path": "src/linear_light/probe.py",
+      "exports": ["probe_device"],
+      "purpose": "Device probing functionality for OpenClaw systems"
+    }
+  },
+  "configuration": {
+    "pyproject.toml": "Python project configuration with build system and dependencies",
+    "__init__.py": "Package initialization file"
+  },
+  "documentation": {
+    "README.md": "Project documentation and setup instructions"
+  },
+  "test_coverage": {
+    "unit_tests": 1,
+    "integration_tests": 0,
+    "coverage_available": false
+  },
+  "dependencies": {
+    "numpy": {
+      "version": "1.26.4",
+      "purpose": "Numerical computing support"
+    },
+    "setuptools": {
+      "version": "69.2.0",
+      "purpose": "Python package building"
+    },
+    "wheel": {
+      "version": "0.42.0",
+      "purpose": "Wheel packaging format"
+    },
+    "pybind11": {
+      "version": "2.11.1",
+      "purpose": "C++/Python binding"
+    }
+  },
+  "quick_start": [
+    "Build the package: pip install -e .",
+    "Run CLI: linear-light --help",
+    "Test installation: Verify linear_light.so is created"
+  ],
+  "external_submodules": {
+    "3rdparty/openclaw": "OpenClaw main repository",
+    "3rdparty/openclaw-linear-plugin": "Plugin interface for linear light",
+    "3rdparty/cyrus": "Cyrus authentication system (optional dependency)"
+  },
+  "project_stats": {
+    "total_files": 14,
+    "python_files": 6,
+    "configuration_files": 2,
+    "documentation_files": 1,
+    "test_files": 1,
+    "estimated_loc": 200
+  },
+  "build_info": {
+    "backend": "setuptools",
+    "extension_module": "linear_light.so",
+    "plugin_sdk_path": "3rdparty/openclaw-linear-plugin/include/openclaw-linear-plugin/",
+    "plugin_interface": "openclaw_linear_plugin.h"
+  },
+  "file_structure": {
+    "3rdparty/": {
+      "cyrus/": {},
+      "openclaw/": {},
+      "openclaw-linear-plugin/": {}
+    },
+    "src/": {
+      "linear_light/": {
+        "__init__.py": {},
+        "cli.py": {},
+        "linear_light.py": {},
+        "probe.py": {}
+      },
+      "linear_light.so": {}
+    },
+    "tests/": {
+      "__init__.py": {}
+    },
+    "LICENSE": {},
+    "README.md": {},
+    "__init__.py": {},
+    "pyproject.toml": {}
+  }
+}
