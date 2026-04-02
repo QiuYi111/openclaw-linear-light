@@ -24,12 +24,28 @@ let lastSweep = Date.now()
 
 // Concurrent run guard — prevents two webhooks for the same issue from spawning
 // parallel agent sessions (e.g. "created" followed quickly by "prompted").
-const activeRuns = new Set<string>()
+// Uses timestamps so stale entries expire after ACTIVE_RUN_TTL_MS even if
+// clearActiveRun is never called (e.g. process crash, hook registration failure).
+const activeRuns = new Map<string, number>()
+export const ACTIVE_RUN_TTL_MS = 30 * 60_000 // 30 minutes
 
 export function clearActiveRun(sessionKey: string, prefix = "linear:"): void {
   if (sessionKey.startsWith(prefix)) {
     activeRuns.delete(sessionKey)
   }
+}
+
+function isSessionActive(sessionKey: string): boolean {
+  const now = Date.now()
+  // Sweep expired entries on every check
+  for (const [k, ts] of activeRuns) {
+    if (now - ts > ACTIVE_RUN_TTL_MS) activeRuns.delete(k)
+  }
+  return activeRuns.has(sessionKey)
+}
+
+function markSessionActive(sessionKey: string): void {
+  activeRuns.set(sessionKey, Date.now())
 }
 
 function wasRecentlyProcessed(key: string): boolean {
@@ -240,11 +256,11 @@ async function handleSessionCreated(
   const sessionKey = `${sessionPrefix}${issueId}`
 
   // Guard: skip if an agent is already running for this issue
-  if (activeRuns.has(sessionKey)) {
+  if (isSessionActive(sessionKey)) {
     api.logger.info(`Linear Light: agent already running for ${issue.identifier}, skipping`)
     return
   }
-  activeRuns.add(sessionKey)
+  markSessionActive(sessionKey)
 
   // Determine prompt content
   // If triggered by @mention, use the comment body
@@ -363,11 +379,11 @@ async function handleSessionPrompted(
   const sessionKey = `${sessionPrefix}${issueId}`
 
   // Guard: skip if an agent is already running for this issue
-  if (activeRuns.has(sessionKey)) {
+  if (isSessionActive(sessionKey)) {
     api.logger.info(`Linear Light: agent already running for ${session.issue.identifier}, skipping follow-up`)
     return
   }
-  activeRuns.add(sessionKey)
+  markSessionActive(sessionKey)
 
   // Ensure agent session ID is available for activity emission
   const agentSessionId = session.id as string | undefined
@@ -419,11 +435,11 @@ async function handleCommentCreate(
   const sessionKey = `${sessionPrefix}${issueId}`
 
   // Guard: skip if an agent is already running for this issue
-  if (activeRuns.has(sessionKey)) {
+  if (isSessionActive(sessionKey)) {
     api.logger.info(`Linear Light: agent already running for issue ${issueId}, skipping`)
     return
   }
-  activeRuns.add(sessionKey)
+  markSessionActive(sessionKey)
 
   api.logger.info(`Linear Light: comment trigger detected (fallback path) for issue ${issueId}`)
 
