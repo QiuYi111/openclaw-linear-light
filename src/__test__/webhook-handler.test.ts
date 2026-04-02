@@ -1,0 +1,535 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import { makeAgentSessionCreated, makeAgentSessionPrompted, signPayload } from "./fixtures"
+
+// ---------------------------------------------------------------------------
+// Webhook handler unit tests
+// ---------------------------------------------------------------------------
+
+const mockLogger = {
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+  debug: vi.fn(),
+}
+
+const mockSubagentRun = vi.fn().mockResolvedValue(undefined)
+
+vi.mock("node:fs", () => ({
+  readFileSync: vi.fn(() => {
+    throw new Error("no file")
+  }),
+  writeFileSync: vi.fn(),
+}))
+
+vi.mock("openclaw/plugin-sdk", () => ({}))
+
+const mockFetch = vi.fn()
+vi.stubGlobal("fetch", mockFetch)
+
+describe("handleWebhook", () => {
+  const SECRET = "wh-secret-test-123"
+
+  // Module-level state (recentlyProcessed, activeRuns) persists across tests
+  // because the module is cached after the first dynamic import.
+  // We use unique IDs to avoid collisions.
+  let uid = 1
+
+  function makeApi(config: Record<string, unknown> = {}) {
+    return {
+      pluginConfig: {
+        enabled: true,
+        webhookSecret: SECRET,
+        mentionTrigger: "Linus",
+        autoInProgress: true,
+        notifyOnComplete: true,
+        notificationChannel: "telegram",
+        notificationTarget: "12345",
+        sessionPrefix: "linear:",
+        ...config,
+      },
+      logger: mockLogger,
+      runtime: {
+        subagent: { run: mockSubagentRun },
+      },
+    } as any
+  }
+
+  function makeSignedReq(payload: Record<string, unknown>, secret: string) {
+    const body = JSON.stringify(payload)
+    const sig = signPayload(body, secret)
+    const chunks: Buffer[] = [Buffer.from(body)]
+
+    const req = {
+      headers: { "linear-signature": sig },
+      on: vi.fn((event: string, cb: (...args: any[]) => void) => {
+        if (event === "data") {
+          for (const chunk of chunks) cb(chunk)
+        }
+        if (event === "end") {
+          cb()
+        }
+      }),
+    }
+
+    const res = {
+      writeHead: vi.fn(),
+      end: vi.fn(),
+    }
+
+    return { req, res }
+  }
+
+  /** Unique "created" payload — avoids dedup and activeRuns collisions */
+  function uniqueCreated(overrides?: Record<string, unknown>) {
+    const n = uid++
+    return makeAgentSessionCreated({
+      createdAt: `2026-04-01T12:00:${String(n).padStart(2, "0")}.000Z`,
+      agentSession: {
+        id: `sess-uid-${n}`,
+        issue: {
+          id: `issue-uid-${n}`,
+          identifier: `ENG-${n + 100}`,
+          title: `Unique issue ${n}`,
+          description: `Description for issue ${n}`,
+          url: `https://linear.app/eng/issue/ENG-${n + 100}`,
+          team: { id: "team-001", key: "ENG", name: "Engineering" },
+        },
+      },
+      ...overrides,
+    })
+  }
+
+  /** Unique "prompted" payload */
+  function uniquePrompted(overrides?: Record<string, unknown>) {
+    const n = uid++
+    return makeAgentSessionPrompted({
+      createdAt: `2026-04-01T12:01:${String(n).padStart(2, "0")}.000Z`,
+      agentSession: {
+        id: `sess-uid-${n}`,
+        issue: {
+          id: `issue-uid-${n}`,
+          identifier: `ENG-${n + 100}`,
+          url: `https://linear.app/eng/issue/ENG-${n + 100}`,
+        },
+      },
+      agentActivity: {
+        content: { body: `Follow-up question ${n}` },
+        signal: null,
+      },
+      ...overrides,
+    })
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockSubagentRun.mockResolvedValue(undefined)
+    mockFetch.mockReset()
+  })
+
+  afterEach(() => {
+    delete process.env.LINEAR_ACCESS_TOKEN
+    delete process.env.LINEAR_API_KEY
+  })
+
+  // -----------------------------------------------------------------------
+  describe("signature verification", () => {
+    // -----------------------------------------------------------------------
+
+    it("rejects requests without signature header", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi()
+      const payload = uniqueCreated()
+      const body = JSON.stringify(payload)
+      const chunks: Buffer[] = [Buffer.from(body)]
+
+      const req = {
+        headers: {},
+        on: vi.fn((event: string, cb: (...args: any[]) => void) => {
+          if (event === "data") for (const chunk of chunks) cb(chunk)
+          if (event === "end") cb()
+        }),
+      }
+
+      const res = { writeHead: vi.fn(), end: vi.fn() } as any
+
+      await handleWebhook(api, req, res)
+      expect(res.writeHead).toHaveBeenCalledWith(401, expect.any(Object))
+    })
+
+    it("rejects requests with invalid signature", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi()
+      const payload = uniqueCreated()
+      const body = JSON.stringify(payload)
+      const chunks: Buffer[] = [Buffer.from(body)]
+
+      const req = {
+        headers: { "linear-signature": "invalid-signature" },
+        on: vi.fn((event: string, cb: (...args: any[]) => void) => {
+          if (event === "data") for (const chunk of chunks) cb(chunk)
+          if (event === "end") cb()
+        }),
+      }
+
+      const res = { writeHead: vi.fn(), end: vi.fn() } as any
+
+      await handleWebhook(api, req, res)
+      expect(res.writeHead).toHaveBeenCalledWith(401, expect.any(Object))
+    })
+
+    it("accepts requests with valid signature", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi()
+      const payload = uniqueCreated()
+      const { req, res } = makeSignedReq(payload, SECRET)
+
+      await handleWebhook(api, req, res)
+      expect(res.writeHead).not.toHaveBeenCalledWith(401, expect.any(Object))
+    })
+  })
+
+  // -----------------------------------------------------------------------
+  describe("deduplication", () => {
+    // -----------------------------------------------------------------------
+
+    it("deduplicates identical webhook payloads", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi()
+      const payload = uniqueCreated()
+
+      const { req: req1, res: res1 } = makeSignedReq(payload, SECRET)
+      await handleWebhook(api, req1, res1)
+
+      const { req: req2, res: res2 } = makeSignedReq(payload, SECRET)
+      await handleWebhook(api, req2, res2)
+
+      const res2Body = res2.end.mock.calls[0]?.[0]
+      expect(res2Body).toContain("deduped")
+    })
+
+    it("uses agentSession.id for AgentSessionEvent dedup key", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi()
+
+      // Two payloads with same agentSession.id but different timestamps
+      const payload1 = uniqueCreated()
+      const payload2 = { ...payload1, createdAt: "2099-01-01T00:00:00.000Z" }
+
+      const { req: req1, res: res1 } = makeSignedReq(payload1, SECRET)
+      await handleWebhook(api, req1, res1)
+
+      const { req: req2, res: res2 } = makeSignedReq(payload2, SECRET)
+      await handleWebhook(api, req2, res2)
+
+      const res2Body = res2.end.mock.calls[0]?.[0]
+      expect(res2Body).toContain("deduped")
+    })
+  })
+
+  // -----------------------------------------------------------------------
+  describe("AgentSessionEvent created", () => {
+    // -----------------------------------------------------------------------
+
+    it("dispatches agent with correct session key", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi()
+      const payload = uniqueCreated()
+      const { req, res } = makeSignedReq(payload, SECRET)
+
+      await handleWebhook(api, req, res)
+
+      expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
+      expect(mockSubagentRun).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionKey: `linear:issue-uid-${uid - 1}`,
+        }),
+      )
+    })
+
+    it("uses sessionPrefix from config", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi({ sessionPrefix: "custom:" })
+      const payload = uniqueCreated()
+      const { req, res } = makeSignedReq(payload, SECRET)
+
+      await handleWebhook(api, req, res)
+
+      expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
+      expect(mockSubagentRun).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionKey: `custom:issue-uid-${uid - 1}`,
+        }),
+      )
+    })
+
+    it("updates issue to In Progress when autoInProgress and accessToken available", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi({ accessToken: "lin_test_token" })
+
+      // Mock fetch for updateIssueState flow:
+      // 1) getIssueDetails  2) getTeamStates  3) issueUpdate mutation
+      mockFetch
+        .mockResolvedValueOnce({
+          ok: true,
+          json: () =>
+            Promise.resolve({
+              data: {
+                issue: {
+                  id: `issue-uid-${uid}`,
+                  identifier: `ENG-${uid + 100}`,
+                  team: { id: "team-001", key: "ENG", name: "Engineering" },
+                },
+              },
+            }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: () =>
+            Promise.resolve({
+              data: {
+                team: {
+                  states: {
+                    nodes: [
+                      { id: "s-todo", name: "Todo" },
+                      { id: "s-ip", name: "In Progress" },
+                      { id: "s-done", name: "Done" },
+                    ],
+                  },
+                },
+              },
+            }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve({ data: { issueUpdate: { success: true } } }),
+        })
+
+      const payload = uniqueCreated()
+      const { req, res } = makeSignedReq(payload, SECRET)
+
+      await handleWebhook(api, req, res)
+
+      expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
+      // 3 fetch calls for the status update flow
+      expect(mockFetch).toHaveBeenCalledTimes(3)
+      const updateCall = mockFetch.mock.calls[2]
+      const body = JSON.parse(updateCall[1].body)
+      expect(body.variables.input.stateId).toBe("s-ip")
+    })
+
+    it("skips session without issue", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi()
+      const payload = uniqueCreated({
+        agentSession: { id: `sess-skip-${uid++}`, issue: null },
+      })
+      const { req, res } = makeSignedReq(payload, SECRET)
+
+      await handleWebhook(api, req, res)
+
+      expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
+      expect(mockSubagentRun).not.toHaveBeenCalled()
+    })
+
+    it("skips when agent already running (activeRuns guard)", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi()
+
+      // First dispatch — agent starts
+      const payload1 = uniqueCreated()
+      const { req: req1, res: res1 } = makeSignedReq(payload1, SECRET)
+      await handleWebhook(api, req1, res1)
+
+      // Second dispatch with DIFFERENT agentSession.id (bypasses dedup)
+      // but SAME issue (hits activeRuns guard)
+      const n = uid++
+      const payload2 = makeAgentSessionCreated({
+        createdAt: `2099-06-01T00:00:${String(n).padStart(2, "0")}.000Z`,
+        agentSession: {
+          ...makeAgentSessionCreated().agentSession,
+          id: `sess-alt-${n}`,
+          issue: payload1.agentSession.issue, // same issue, different session
+        },
+      })
+      const { req: req2, res: res2 } = makeSignedReq(payload2, SECRET)
+      await handleWebhook(api, req2, res2)
+
+      // First call dispatches, second blocked by activeRuns
+      expect(mockSubagentRun).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  // -----------------------------------------------------------------------
+  describe("webhook processing errors", () => {
+    // -----------------------------------------------------------------------
+
+    it("returns 500 when agent dispatch fails", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      mockSubagentRun.mockRejectedValue(new Error("agent crashed"))
+      const api = makeApi()
+      const payload = uniqueCreated()
+      const { req, res } = makeSignedReq(payload, SECRET)
+
+      await handleWebhook(api, req, res)
+
+      expect(res.writeHead).toHaveBeenCalledWith(500, expect.any(Object))
+    })
+
+    it("handles autoInProgress fetch failure gracefully", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi({ accessToken: "lin_test_token" })
+
+      // First call fails (getIssueDetails)
+      mockFetch.mockRejectedValueOnce(new Error("fetch failed"))
+
+      const payload = uniqueCreated()
+      const { req, res } = makeSignedReq(payload, SECRET)
+
+      await handleWebhook(api, req, res)
+
+      // Should still succeed (status update is best-effort)
+      expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
+      expect(mockSubagentRun).toHaveBeenCalled()
+    })
+  })
+
+  // -----------------------------------------------------------------------
+  describe("AgentSessionEvent prompted", () => {
+    // -----------------------------------------------------------------------
+
+    it("dispatches follow-up for prompted events", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi()
+      const payload = uniquePrompted()
+      const { req, res } = makeSignedReq(payload, SECRET)
+
+      await handleWebhook(api, req, res)
+
+      expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
+      expect(mockSubagentRun).toHaveBeenCalled()
+    })
+
+    it("skips prompted events with stop signal", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi()
+      const payload = uniquePrompted({
+        agentActivity: { signal: "stop", content: { body: "stop" } },
+      })
+      const { req, res } = makeSignedReq(payload, SECRET)
+
+      await handleWebhook(api, req, res)
+
+      expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
+      expect(mockSubagentRun).not.toHaveBeenCalled()
+    })
+
+    it("skips prompted events without content body", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi()
+      const payload = uniquePrompted({
+        agentActivity: { content: { body: null }, signal: null },
+      })
+      const { req, res } = makeSignedReq(payload, SECRET)
+
+      await handleWebhook(api, req, res)
+
+      expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
+      expect(mockSubagentRun).not.toHaveBeenCalled()
+    })
+  })
+
+  // -----------------------------------------------------------------------
+  describe("Comment create event", () => {
+    // -----------------------------------------------------------------------
+
+    it("handles Comment type webhooks (fallback path)", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi()
+      const payload = {
+        type: "Comment",
+        action: "create",
+        createdAt: `2026-04-01T13:00:${String(uid++).padStart(2, "0")}.000Z`,
+        data: {
+          id: `comment-uid-${uid}`,
+          body: "@Linus can you check this?",
+          issue: { id: `issue-comment-${uid}` },
+        },
+      }
+      const { req, res } = makeSignedReq(payload, SECRET)
+
+      await handleWebhook(api, req, res)
+
+      expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
+      // Comment path does not dispatch agent
+      expect(mockSubagentRun).not.toHaveBeenCalled()
+    })
+
+    it("skips Comment without mention trigger", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi()
+      const payload = {
+        type: "Comment",
+        action: "create",
+        createdAt: `2026-04-01T14:00:${String(uid++).padStart(2, "0")}.000Z`,
+        data: {
+          id: `comment-uid-${uid}`,
+          body: "Just a normal comment without trigger",
+          issue: { id: `issue-comment-${uid}` },
+        },
+      }
+      const { req, res } = makeSignedReq(payload, SECRET)
+
+      await handleWebhook(api, req, res)
+
+      expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
+      expect(mockSubagentRun).not.toHaveBeenCalled()
+    })
+  })
+
+  // -----------------------------------------------------------------------
+  describe("unhandled event types", () => {
+    // -----------------------------------------------------------------------
+
+    it("returns 200 for unknown event types", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi()
+      const payload = {
+        type: "UnknownType",
+        action: "create",
+        createdAt: `2026-04-01T15:00:${String(uid++).padStart(2, "0")}.000Z`,
+      }
+      const { req, res } = makeSignedReq(payload, SECRET)
+
+      await handleWebhook(api, req, res)
+
+      expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
+    })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Sanitization tests (imported from utils.ts)
+// ---------------------------------------------------------------------------
+
+describe("sanitizePromptInput", () => {
+  it("truncates input exceeding maxLength", async () => {
+    const { sanitizePromptInput } = await import("../utils.js")
+    const long = "a".repeat(5000)
+    expect(sanitizePromptInput(long, 1000).length).toBe(1000)
+  })
+
+  it("escapes double curly braces", async () => {
+    const { sanitizePromptInput } = await import("../utils.js")
+    expect(sanitizePromptInput("hello {{world}}")).toBe("hello { {world} }")
+  })
+
+  it("returns placeholder for empty input", async () => {
+    const { sanitizePromptInput } = await import("../utils.js")
+    expect(sanitizePromptInput("")).toBe("(no content)")
+  })
+
+  it("preserves normal text", async () => {
+    const { sanitizePromptInput } = await import("../utils.js")
+    expect(sanitizePromptInput("Hello World")).toBe("Hello World")
+  })
+})

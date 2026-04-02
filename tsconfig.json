@@ -11,5 +11,5 @@
     "resolveJsonModule": true
   },
   "include": ["index.ts", "src/**/*.ts"],
-  "exclude": ["node_modules", "3rdparty", "dist"]
+  "exclude": ["node_modules", "3rdparty", "dist", "src/__test__"]
 }

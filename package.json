@@ -13,14 +13,26 @@
   ],
   "scripts": {
     "dev": "echo 'run via openclaw plugin system'",
-    "typecheck": "tsc --noEmit"
+    "lint": "biome check src/ index.ts",
+    "lint:fix": "biome check --fix src/ index.ts",
+    "format": "biome format src/ index.ts",
+    "format:fix": "biome format --fix src/ index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "check": "npm run lint && npm run typecheck && npm run test"
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.4.10",
+    "@vitest/coverage-v8": "^4.1.2",
     "openclaw": "^2026.3.7",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.2"
   },
   "openclaw": {
-    "extensions": ["./index.ts"]
-  },
-  "dependencies": {}
+    "extensions": [
+      "./index.ts"
+    ]
+  }
 }

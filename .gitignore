@@ -7,4 +7,6 @@ node_modules/
 3rdparty/cyrus/
 3rdparty/openclaw-linear-plugin/
 3rdparty/openclaw/
+coverage/
+dist/
 
