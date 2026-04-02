@@ -617,6 +617,28 @@ describe("handleWebhook", () => {
       expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
       expect(mockSubagentRun).not.toHaveBeenCalled()
     })
+
+    it("handleSessionPrompted blocks when agent already running from created event", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi()
+
+      // First: created event dispatches agent
+      const created = uniqueCreated()
+      const { req, res } = makeSignedReq(created, SECRET)
+      await handleWebhook(api, req, res)
+      expect(mockSubagentRun).toHaveBeenCalledTimes(1)
+
+      // Second: prompted for SAME issue (different session ID to bypass dedup)
+      const prompted = uniquePrompted({
+        agentSession: { id: "sess-prompt", issue: created.agentSession.issue },
+        agentActivity: { content: { body: "follow up" }, signal: null },
+      })
+      const { req: r2, res: res2 } = makeSignedReq(prompted, SECRET)
+      await handleWebhook(api, r2, res2)
+
+      // activeRuns guard prevents second dispatch
+      expect(mockSubagentRun).toHaveBeenCalledTimes(1)
+    })
   })
 
   // -----------------------------------------------------------------------
@@ -933,6 +955,136 @@ describe("handleWebhook", () => {
 
       expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
       expect(mockSubagentRun).not.toHaveBeenCalled()
+    })
+
+    it("handleCommentCreate blocks when agent already running from created event (cross-type activeRuns)", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi({ accessToken: "lin_test_token" })
+
+      // First: created event dispatches agent
+      const created = uniqueCreated()
+      const { req, res } = makeSignedReq(created, SECRET)
+      await handleWebhook(api, req, res)
+      expect(mockSubagentRun).toHaveBeenCalledTimes(1)
+
+      // Second: comment fallback for SAME issue — should be blocked by activeRuns
+      const commentPayload = {
+        type: "Comment",
+        action: "create",
+        createdAt: `2026-04-01T15:00:${String(uid++).padStart(2, "0")}.000Z`,
+        data: {
+          id: `comment-cross-type-${uid}`,
+          body: "@Linus please help with this",
+          issue: { id: created.agentSession.issue.id },
+        },
+      }
+      const { req: r2, res: res2 } = makeSignedReq(commentPayload, SECRET)
+      await handleWebhook(api, r2, res2)
+
+      expect(res2.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
+      // activeRuns guard prevents second dispatch
+      expect(mockSubagentRun).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  // -----------------------------------------------------------------------
+  describe("cross-path activeRuns guards", () => {
+    // -----------------------------------------------------------------------
+
+    it("handleSessionCreated blocks handleCommentCreate for same issue (cross-path guard)", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi({ accessToken: "lin_test_token" })
+
+      const crossIssueId = `issue-cross-${uid}`
+
+      // First: AgentSessionEvent created — adds to activeRuns
+      const created = makeAgentSessionCreated({
+        createdAt: `2099-12-01T00:00:${String(uid++).padStart(2, "0")}.000Z`,
+        agentSession: {
+          id: `sess-cross-${uid}`,
+          issue: {
+            id: crossIssueId,
+            identifier: `ENG-${uid + 100}`,
+            title: `Cross issue ${uid}`,
+            description: `Desc ${uid}`,
+            url: `https://linear.app/eng/issue/ENG-${uid + 100}`,
+            team: { id: "team-001", key: "ENG", name: "Engineering" },
+          },
+        },
+      })
+      const { req: req1, res: res1 } = makeSignedReq(created, SECRET)
+      await handleWebhook(api, req1, res1)
+      expect(mockSubagentRun).toHaveBeenCalledTimes(1)
+
+      // Second: Comment create for the same issue — should be blocked by activeRuns
+      const commentPayload = {
+        type: "Comment",
+        action: "create",
+        createdAt: `2099-12-01T00:01:${String(uid++).padStart(2, "0")}.000Z`,
+        data: { id: `comment-cross-${uid}`, body: "@Linus follow up", issue: { id: crossIssueId } },
+      }
+      const { req: req2, res: res2 } = makeSignedReq(commentPayload, SECRET)
+      await handleWebhook(api, req2, res2)
+
+      expect(res2.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
+      expect(mockSubagentRun).toHaveBeenCalledTimes(1) // comment was blocked
+    })
+
+    it("handleCommentCreate blocks handleSessionPrompted for same issue (cross-path guard)", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi({ accessToken: "lin_test_token" })
+
+      const crossIssueId = `issue-cross2-${uid}`
+
+      // First: Comment create — adds to activeRuns via comment fallback
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            data: {
+              issue: {
+                id: crossIssueId,
+                identifier: `ENG-${uid + 200}`,
+                title: "Cross2 Issue",
+                description: "Test",
+                url: `https://linear.app/eng/issue/ENG-${uid + 200}`,
+                state: { name: "Todo", type: "unstarted" },
+                creator: null,
+                assignee: null,
+                labels: { nodes: [] },
+                team: { id: "team-001", key: "ENG", name: "Engineering" },
+                comments: { nodes: [] },
+                project: null,
+              },
+            },
+          }),
+      })
+
+      const commentPayload = {
+        type: "Comment",
+        action: "create",
+        createdAt: `2099-12-02T00:00:${String(uid++).padStart(2, "0")}.000Z`,
+        data: { id: `comment-cross2-${uid}`, body: "@Linus start here", issue: { id: crossIssueId } },
+      }
+      const { req: req1, res: res1 } = makeSignedReq(commentPayload, SECRET)
+      await handleWebhook(api, req1, res1)
+      expect(mockSubagentRun).toHaveBeenCalledTimes(1)
+
+      // Second: Prompted event for the same issue — should be blocked by activeRuns
+      const n2 = uid++
+      const promptedPayload = makeAgentSessionPrompted({
+        createdAt: `2099-12-02T00:01:${String(n2).padStart(2, "0")}.000Z`,
+        agentSession: {
+          id: `sess-cross2-${n2}`,
+          issue: { id: crossIssueId, identifier: `ENG-${n2 + 200}`, url: `https://linear.app/eng/issue/ENG-${n2 + 200}` },
+        },
+        agentActivity: { content: { body: "Follow-up after comment" }, signal: null },
+      })
+      const { req: req2, res: res2 } = makeSignedReq(promptedPayload, SECRET)
+      await handleWebhook(api, req2, res2)
+
+      expect(res2.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
+      expect(mockSubagentRun).toHaveBeenCalledTimes(1) // prompted was blocked
     })
   })
 
