@@ -7,6 +7,11 @@
     "type": "object",
     "additionalProperties": false,
     "properties": {
+      "enabled": {
+        "type": "boolean",
+        "description": "Enable or disable the plugin",
+        "default": true
+      },
       "webhookSecret": {
         "type": "string",
         "description": "Linear webhook signing secret",
@@ -22,19 +27,14 @@
         "description": "Automatically set issue to In Progress when agent starts working",
         "default": true
       },
-      "notifyOnComplete": {
-        "type": "boolean",
-        "description": "Send notification when agent finishes (for review)",
-        "default": true
-      },
-      "notificationChannel": {
+      "agentIdentity": {
         "type": "string",
-        "description": "Channel to send completion notifications to (e.g. telegram)",
-        "default": "telegram"
+        "description": "Custom system identity instruction injected into agent prompts. Default: 'You are OpenClaw, a Linear workflow assistant. Do not respond using a personal assistant identity (e.g. Linus). Available tools: linear_update_status (change status), linear_get_issue (view details), linear_search_issues (search). Important: Do not modify issue status (especially do not mark Done) unless explicitly requested by the user.'"
       },
-      "notificationTarget": {
+      "initialResponseTemplate": {
         "type": "string",
-        "description": "Target chat/user ID for notifications"
+        "description": "Template for initial activity response. Supports {identifier} and {title} placeholders.",
+        "default": "Received, processing {identifier}: {title}"
       },
       "linearClientId": {
         "type": "string",
@@ -45,11 +45,6 @@
         "type": "string",
         "description": "Linear OAuth client secret (required for token refresh)",
         "sensitive": true
-      },
-      "sessionPrefix": {
-        "type": "string",
-        "description": "Prefix for session keys",
-        "default": "linear:"
       }
     }
   }

@@ -5,6 +5,8 @@
  * Borrowed from openclaw-linear-plugin (calltelemetry/openclaw-linear-plugin).
  */
 
+import { readStoredToken, writeStoredToken } from "./oauth-store.js"
+
 /**
  * Minimal logger interface matching OpenClaw's api.logger shape.
  */
@@ -39,7 +41,6 @@ export function resolveLinearToken(pluginConfig?: Record<string, unknown>): {
 } {
   // 1. Plugin-local OAuth token (from ~/.openclaw/plugins/linear-light/token.json)
   try {
-    const { readStoredToken } = require("./oauth-store.js")
     const stored = readStoredToken()
     if (stored?.accessToken) {
       return {
@@ -173,7 +174,6 @@ export class LinearAgentApi {
   private persistToken(): void {
     // Persist to plugin-local storage only
     try {
-      const { writeStoredToken } = require("./oauth-store.js")
       writeStoredToken(
         {
           accessToken: this.accessToken,

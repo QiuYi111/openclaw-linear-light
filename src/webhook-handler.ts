@@ -20,6 +20,23 @@ import { sanitizePromptInput } from "./utils.js"
 
 const CHANNEL_ID = "linear" as const
 
+const DEFAULT_AGENT_IDENTITY =
+  "You are OpenClaw, a Linear workflow assistant. " +
+  "Do not respond using a personal assistant identity (e.g. Linus). " +
+  "Available tools: linear_update_status (change status), linear_get_issue (view details), linear_search_issues (search). " +
+  "Important: Do not modify issue status (especially do not mark Done) unless explicitly requested by the user."
+
+const DEFAULT_INITIAL_RESPONSE_TEMPLATE = "Received, processing {identifier}: {title}"
+
+function getAgentIdentity(config: Record<string, unknown> | undefined): string {
+  return (config?.agentIdentity as string) || DEFAULT_AGENT_IDENTITY
+}
+
+function formatInitialResponse(config: Record<string, unknown> | undefined, identifier: string, title: string): string {
+  const template = (config?.initialResponseTemplate as string) || DEFAULT_INITIAL_RESPONSE_TEMPLATE
+  return template.replace("{identifier}", identifier).replace("{title}", title)
+}
+
 // Dedup tracking
 const recentlyProcessed = new Map<string, number>()
 const DEDUP_TTL_MS = 60_000
@@ -204,7 +221,7 @@ async function handleSessionCreated(
     try {
       await linearApi.emitActivity(session.id, {
         type: "response",
-        body: `已收到，正在处理 ${issue.identifier}: ${issue.title}`,
+        body: formatInitialResponse(config, issue.identifier, issue.title),
       })
       api.logger.info(`Linear Light: emitted initial activity for ${issue.identifier}`)
     } catch (err) {
@@ -222,9 +239,7 @@ async function handleSessionCreated(
     isMentionTriggered ? `\n---\n**User comment:**\n${sanitizedPrompt}` : "",
     `\n---\nIssue URL: ${issue.url}`,
     ``,
-    `【身份】你是 Openclaw，一个 Linear 工作流助手。不要使用个人助手身份（如 Linus）回复。`,
-    `可用工具：linear_update_status（改状态）、linear_get_issue（查详情）、linear_search_issues（搜索）。`,
-    `【重要】不要主动修改 issue 状态（尤其不要标 Done），除非用户明确要求。`,
+    getAgentIdentity(config),
   ].join("\n")
 
   await dispatchToAgent(api, { issue, body, config })
@@ -245,12 +260,7 @@ async function handleSessionPrompted(
   if (session.id) agentSessionMap.set(session.issue.id, session.id)
 
   const prompt = sanitizePromptInput(activity.content.body)
-  const body = [
-    `[Linear ${session.issue.identifier} follow-up]`,
-    prompt,
-    ``,
-    `【身份】你是 Openclaw，一个 Linear 工作流助手。不要使用个人助手身份（如 Linus）回复。`,
-  ].join("\n")
+  const body = [`[Linear ${session.issue.identifier} follow-up]`, prompt, ``, getAgentIdentity(config)].join("\n")
 
   await dispatchToAgent(api, { issue: session.issue, body, config })
 }
@@ -303,7 +313,7 @@ async function handleCommentCreate(
     `\n---\n**User comment:**\n${sanitizedPrompt}`,
     `\n---\nIssue URL: ${issue.url}`,
     ``,
-    `【身份】你是 Openclaw，一个 Linear 工作流助手。不要使用个人助手身份（如 Linus）回复。`,
+    getAgentIdentity(config),
   ].join("\n")
 
   await dispatchToAgent(api, { issue, body, config })
