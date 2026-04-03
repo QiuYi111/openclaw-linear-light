@@ -85,4 +85,28 @@ describe("validateConfig", () => {
     expect(result.valid).toBe(false)
     expect(result.errors).toHaveLength(1)
   })
+
+  it("validates correctly with empty linearClientId (missing OAuth)", () => {
+    const result = validateConfig({
+      webhookSecret: "wh-secret",
+      linearClientId: "",
+      linearClientSecret: "client-secret",
+    })
+
+    expect(result.valid).toBe(true)
+    expect(result.warnings).toHaveLength(1)
+    expect(result.warnings[0]).toContain("linearClientId")
+  })
+
+  it("validates correctly with empty linearClientSecret (missing OAuth)", () => {
+    const result = validateConfig({
+      webhookSecret: "wh-secret",
+      linearClientId: "client-id",
+      linearClientSecret: "",
+    })
+
+    expect(result.valid).toBe(true)
+    expect(result.warnings).toHaveLength(1)
+    expect(result.warnings[0]).toContain("linearClientSecret")
+  })
 })
