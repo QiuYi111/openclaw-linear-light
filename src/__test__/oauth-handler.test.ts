@@ -236,7 +236,7 @@ describe("handleOAuthCallback", () => {
     await handleOAuthCallback(api, req, res)
 
     expect(res.statusCode).toBe(200)
-    expect(res.body).toContain("OAuth Setup Complete")
+    expect(res.body).toContain("Connected")
     expect(mockWriteStoredToken).toHaveBeenCalledWith(
       expect.objectContaining({
         accessToken: "new-access",
