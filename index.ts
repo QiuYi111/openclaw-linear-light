@@ -17,7 +17,13 @@ import { getChatChannelMeta, type ChannelPlugin } from "openclaw/plugin-sdk"
 import { LinearAgentApi, resolveLinearToken } from "./src/api/linear-api.js"
 import { handleOAuthCallback, handleOAuthInit } from "./src/oauth-handler.js"
 import { handleWebhook } from "./src/webhook-handler.js"
-import { setLinearRuntime } from "./src/runtime.js"
+import { setLinearRuntime, setLinearApi, getLinearApi } from "./src/runtime.js"
+import {
+  onLlmOutput,
+  onBeforeToolCall,
+  onAfterToolCall,
+  onAgentEnd,
+} from "./src/activity-stream.js"
 
 // ---------------------------------------------------------------------------
 // Maps issueId → Linear agent session ID (for emitActivity)
@@ -85,6 +91,12 @@ export default function register(api: OpenClawPluginApi) {
     api.registerTool(tool)
   }
 
+  // Register lifecycle hooks for real-time activity streaming
+  api.on("llm_output", onLlmOutput)
+  api.on("before_tool_call", onBeforeToolCall)
+  api.on("after_tool_call", onAfterToolCall)
+  api.on("agent_end", onAgentEnd)
+
   api.logger.info("Linear Light: ready (channel mode)")
 }
 
@@ -129,6 +141,9 @@ const linearPlugin: ChannelPlugin = {
         source: tokenInfo.source,
       })
 
+      // Share for activity streaming
+      setLinearApi(linearApi)
+
       try {
         // `to` could be issue identifier (DEV-134) or issue UUID
         // We store the mapping in webhook-handler, but for outbound we need to resolve
@@ -172,6 +187,9 @@ async function resolveIssueId(linearApi: LinearAgentApi, idOrIdentifier: string)
     return idOrIdentifier
   }
 
+  // Strip channel prefix (e.g. "linear:DEV-134" → "DEV-134")
+  const identifier = idOrIdentifier.replace(/^[a-z]+:/, "")
+
   // Try to find by identifier (e.g. "DEV-134")
   try {
     const data = await (linearApi as any).gql<{
@@ -180,7 +198,7 @@ async function resolveIssueId(linearApi: LinearAgentApi, idOrIdentifier: string)
       `query IssueByIdentifier($identifier: String!) {
         issue(identifier: $identifier) { id }
       }`,
-      { identifier: idOrIdentifier },
+      { identifier },
     )
     return data.issue?.id ?? null
   } catch {

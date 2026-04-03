@@ -14,7 +14,7 @@ import {
 } from "openclaw/plugin-sdk"
 import { LinearAgentApi, resolveLinearToken } from "./api/linear-api.js"
 import { sanitizePromptInput } from "./utils.js"
-import { getLinearRuntime } from "./runtime.js"
+import { getLinearRuntime, setLinearApi } from "./runtime.js"
 import { agentSessionMap } from "../index.js"
 
 const CHANNEL_ID = "linear" as const
@@ -284,7 +284,7 @@ async function dispatchToAgent(
 ): Promise<void> {
   const { issue, body, config } = params
   const core = getLinearRuntime()
-  const cfg = config as OpenClawConfig
+  const cfg = api.config as OpenClawConfig
 
   // Use issue identifier as peer ID (e.g. "DEV-134")
   const peerId = issue.identifier
@@ -295,6 +295,8 @@ async function dispatchToAgent(
     accountId: "default",
     peer: { kind: "direct", id: peerId },
   })
+
+  api.logger.info(`Linear Light: route resolved: agentId=${route.agentId} sessionKey=${route.sessionKey} model=${route.model}`)
 
   const storePath = core.channel.session.resolveStorePath(
     (cfg as any).session?.store,
@@ -319,7 +321,22 @@ async function dispatchToAgent(
     OriginatingTo: `linear:${peerId}`,
   })
 
-  // No deliver callback needed — outbound adapter handles delivery
+  // Deliver callback: send agent reply back to Linear as a comment
+  const deliver = async (payload: { text?: string; mediaUrls?: string[]; replyToId?: string }) => {
+    if (!payload.text) return
+    const api2 = makeLinearApi(config, api)
+    if (!api2) {
+      api.logger.error(`Linear Light: deliver failed — no access token for ${issue.identifier}`)
+      return
+    }
+    try {
+      await api2.createComment(issue.id, payload.text)
+      api.logger.info(`Linear Light: delivered comment to ${issue.identifier}`)
+    } catch (err) {
+      api.logger.error(`Linear Light: deliver error for ${issue.identifier}: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+
   await dispatchInboundReplyWithBase({
     cfg,
     channel: CHANNEL_ID,
@@ -337,6 +354,9 @@ async function dispatchToAgent(
         },
       },
     },
+    deliver,
+    onRecordError: (err) => api.logger.error(`Linear Light: record inbound error: ${String(err)}`),
+    onDispatchError: (err, info) => api.logger.error(`Linear Light: dispatch error [${info.kind}]: ${String(err)}`),
   })
 
   api.logger.info(`Linear Light: dispatched agent for ${issue.identifier} (channel mode)`)
@@ -345,7 +365,7 @@ async function dispatchToAgent(
 function makeLinearApi(config: Record<string, unknown> | undefined, api: OpenClawPluginApi) {
   const tokenInfo = resolveLinearToken(config)
   if (!tokenInfo.accessToken) return null
-  return new LinearAgentApi(tokenInfo.accessToken, {
+  const linearApi = new LinearAgentApi(tokenInfo.accessToken, {
     refreshToken: tokenInfo.refreshToken,
     expiresAt: tokenInfo.expiresAt,
     clientId: (config?.linearClientId as string) || process.env.LINEAR_CLIENT_ID,
@@ -353,4 +373,7 @@ function makeLinearApi(config: Record<string, unknown> | undefined, api: OpenCla
     source: tokenInfo.source,
     logger: api.logger,
   })
+  // Share the API instance for activity streaming hooks
+  setLinearApi(linearApi)
+  return linearApi
 }
