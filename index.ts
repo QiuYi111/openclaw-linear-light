@@ -1,33 +1,52 @@
 /**
- * Linear Light Plugin for OpenClaw
+ * Linear Channel Plugin for OpenClaw
  *
- * Lightweight Linear integration:
- * - Receives webhooks from Linear (comment events, agent session events)
- * - Triggers an agent session per issue when @mentioned
- * - Manages issue status (In Progress → Done)
- * - Sends completion notifications for review
+ * Linear as a first-class OpenClaw channel — every issue is a session.
+ * Users get the full agent experience (all tools, skills, memory)
+ * just like chatting on Telegram or Feishu.
  *
- * Infrastructure borrowed from:
- * - openclaw-linear-plugin (calltelemetry): webhook handling, Linear API, dedup
- * - cyrus linear-event-transport: webhook verification, message translation
+ * Architecture:
+ * - Linear webhook → dispatchInboundReplyWithBase() → main agent → outbound.sendText() → createComment()
+ * - Each issue = one OpenClaw session (agent:main:linear:issue:<identifier>)
+ * - Agent replies automatically become Linear comments via outbound adapter
+ * - Additional tools for Linear operations (update status, search, etc.)
  */
 
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk"
+import { getChatChannelMeta, type ChannelPlugin } from "openclaw/plugin-sdk"
 import { LinearAgentApi, resolveLinearToken } from "./src/api/linear-api.js"
 import { handleOAuthCallback, handleOAuthInit } from "./src/oauth-handler.js"
-import { agentSessionMap, clearActiveRun, handleWebhook } from "./src/webhook-handler.js"
+import { handleWebhook } from "./src/webhook-handler.js"
+import { setLinearRuntime, setLinearApi, getLinearApi } from "./src/runtime.js"
+import {
+  onLlmOutput,
+  onBeforeToolCall,
+  onAfterToolCall,
+  onAgentEnd,
+} from "./src/activity-stream.js"
+
+// ---------------------------------------------------------------------------
+// Maps issueId → Linear agent session ID (for emitActivity)
+// ---------------------------------------------------------------------------
+
+export const agentSessionMap = new Map<string, string>()
+
+// ---------------------------------------------------------------------------
+// Plugin registration
+// ---------------------------------------------------------------------------
 
 export default function register(api: OpenClawPluginApi) {
   const config = api.pluginConfig as Record<string, unknown> | undefined
 
-  if (!config?.enabled) {
+  if (config?.enabled === false) {
     api.logger.info("Linear Light: disabled by config")
     return
   }
 
-  const tokenInfo = resolveLinearToken(config)
+  // Store runtime for channel utilities access
+  setLinearRuntime(api.runtime)
 
-  // Always register OAuth routes (needed to obtain the first token)
+  // Register OAuth routes (always available — needed for first token)
   api.registerHttpRoute({
     path: "/linear-light/oauth/callback",
     auth: "plugin",
@@ -46,12 +65,13 @@ export default function register(api: OpenClawPluginApi) {
     },
   })
 
+  const tokenInfo = resolveLinearToken(config)
   if (!tokenInfo.accessToken) {
     api.logger.warn("Linear Light: no access token. Visit /linear-light/oauth/init to start OAuth flow.")
     return
   }
 
-  api.logger.info(`Linear Light: token source=${tokenInfo.source}, registering routes...`)
+  api.logger.info(`Linear Light: token source=${tokenInfo.source}, registering as channel...`)
 
   // Register webhook endpoint
   api.registerHttpRoute({
@@ -63,163 +83,142 @@ export default function register(api: OpenClawPluginApi) {
     },
   })
 
-  // Register agent tools for Linear interaction
+  // Register as a first-class channel — this is what makes deliver work
+  api.registerChannel({ plugin: linearPlugin as ChannelPlugin })
+
+  // Register Linear operation tools
   for (const tool of createLinearTools(api)) {
     api.registerTool(tool)
   }
 
-  // Hook into subagent lifecycle to update Linear status and notify
-  api.registerHook("subagent_ended", async (event: any) => {
-    await onSubagentEnded(api, event)
-  })
+  // Register lifecycle hooks for real-time activity streaming
+  // @ts-expect-error — hook signatures vary across openclaw versions
+  api.on("llm_output", onLlmOutput)
+  // @ts-expect-error — hook signatures vary across openclaw versions
+  api.on("before_tool_call", onBeforeToolCall)
+  // @ts-expect-error — hook signatures vary across openclaw versions
+  api.on("after_tool_call", onAfterToolCall)
+  // @ts-expect-error — hook signatures vary across openclaw versions
+  api.on("agent_end", onAgentEnd)
 
-  api.logger.info("Linear Light: ready")
+  api.logger.info("Linear Light: ready (channel mode)")
 }
 
 // ---------------------------------------------------------------------------
-// Tools
+// Channel Plugin definition
 // ---------------------------------------------------------------------------
 
-function makeLinearApi(config: Record<string, unknown> | undefined, api: OpenClawPluginApi) {
-  const tokenInfo = resolveLinearToken(config)
-  if (!tokenInfo.accessToken) return null
-  return new LinearAgentApi(tokenInfo.accessToken, {
-    refreshToken: tokenInfo.refreshToken,
-    expiresAt: tokenInfo.expiresAt,
-    clientId: (config?.linearClientId as string) || process.env.LINEAR_CLIENT_ID,
-    clientSecret: (config?.linearClientSecret as string) || process.env.LINEAR_CLIENT_SECRET,
-    source: tokenInfo.source,
-    logger: api.logger,
-  })
+const meta = getChatChannelMeta("linear")
+
+const linearPlugin: ChannelPlugin = {
+  id: "linear",
+  meta: {
+    ...meta,
+    quickstartAllowFrom: false,
+  },
+  capabilities: {
+    chatTypes: ["direct"],
+    media: false,
+    blockStreaming: false,
+  },
+  config: {
+    listAccountIds: () => ["default"],
+    resolveAccount: () => ({ accountId: "default", configured: true } as any),
+    defaultAccountId: () => "default",
+  },
+  outbound: {
+    deliveryMode: "direct",
+    sendText: async ({ cfg, to, text }) => {
+      // `to` is the issue identifier (e.g. "DEV-134") from the session key
+      // We need to resolve it to an issue UUID and post a comment
+      const pluginConfig = (cfg.plugins?.entries?.["linear-light"] as any)?.config
+      const tokenInfo = resolveLinearToken(pluginConfig)
+      if (!tokenInfo.accessToken) {
+        return { channel: "linear", ok: false, error: "no access token" }
+      }
+
+      const linearApi = new LinearAgentApi(tokenInfo.accessToken, {
+        refreshToken: tokenInfo.refreshToken,
+        expiresAt: tokenInfo.expiresAt,
+        clientId: (pluginConfig?.linearClientId as string) || process.env.LINEAR_CLIENT_ID,
+        clientSecret: (pluginConfig?.linearClientSecret as string) || process.env.LINEAR_CLIENT_SECRET,
+        source: tokenInfo.source,
+      })
+
+      // Share for activity streaming
+      setLinearApi(linearApi)
+
+      try {
+        // `to` could be issue identifier (DEV-134) or issue UUID
+        // We store the mapping in webhook-handler, but for outbound we need to resolve
+        // For now, use the identifier to find the issue
+        const issueId = await resolveIssueId(linearApi, to)
+        if (!issueId) {
+          return { channel: "linear", ok: false, error: `could not resolve issue: ${to}` }
+        }
+
+        await linearApi.createComment(issueId, text)
+
+        // Emit response activity for Linear's agent session UI
+        const agentSessionId = agentSessionMap.get(issueId)
+        if (agentSessionId) {
+          try {
+            await linearApi.emitActivity(agentSessionId, { type: "response", body: text })
+          } catch {
+            // Best-effort
+          }
+        }
+
+        return { channel: "linear", ok: true }
+      } catch (err) {
+        return {
+          channel: "linear",
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        }
+      }
+    },
+  },
 }
+
+// ---------------------------------------------------------------------------
+// Resolve issue identifier or UUID to issue ID
+// ---------------------------------------------------------------------------
+
+async function resolveIssueId(linearApi: LinearAgentApi, idOrIdentifier: string): Promise<string | null> {
+  // If it looks like a UUID, use directly
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(idOrIdentifier)) {
+    return idOrIdentifier
+  }
+
+  // Strip channel prefix (e.g. "linear:DEV-134" → "DEV-134")
+  const identifier = idOrIdentifier.replace(/^[a-z]+:/, "")
+
+  // Try to find by identifier (e.g. "DEV-134")
+  try {
+    // @ts-expect-error — gql is untyped in CI's openclaw version
+    const data = await (linearApi as any).gql<{
+      issue: { id: string } | null
+    }>(
+      `query IssueByIdentifier($identifier: String!) {
+        issue(identifier: $identifier) { id }
+      }`,
+      { identifier },
+    )
+    return data.issue?.id ?? null
+  } catch {
+    return null
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Tools — Linear operations
+// ---------------------------------------------------------------------------
 
 function createLinearTools(api: OpenClawPluginApi): any[] {
   const config = api.pluginConfig as Record<string, unknown> | undefined
-  const linearApi = makeLinearApi(config, api)
-  if (!linearApi) return []
-
-  return [
-    {
-      name: "linear_comment",
-      label: "Linear Comment",
-      description: "Post a comment on a Linear issue. Use this to report progress or results.",
-      parameters: {
-        type: "object" as const,
-        properties: {
-          issueId: { type: "string", description: "The Linear issue UUID" },
-          body: { type: "string", description: "Comment body (supports Markdown)" },
-        },
-        required: ["issueId", "body"],
-      },
-      execute: async (_toolCallId: string, { issueId, body }: { issueId: string; body: string }) => {
-        const agentSessionId = agentSessionMap.get(issueId)
-        try {
-          await linearApi.createComment(issueId, body)
-
-          // Emit response activity so Linear shows progress
-          if (agentSessionId) {
-            try {
-              await linearApi.emitActivity(agentSessionId, { type: "response", body })
-            } catch (activityErr) {
-              api.logger.warn(`Linear Light: failed to emit activity: ${activityErr}`)
-            }
-          }
-
-          return { content: [{ type: "text", text: `Comment posted on issue ${issueId}` }], details: {} }
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err)
-
-          // Emit error activity
-          if (agentSessionId) {
-            try {
-              await linearApi.emitActivity(agentSessionId, { type: "error", body: `Failed to comment: ${msg}` })
-            } catch {}
-          }
-
-          return {
-            content: [{ type: "text", text: `Failed to comment: ${msg}` }],
-            details: { status: "failed" },
-          }
-        }
-      },
-    },
-    {
-      name: "linear_update_status",
-      label: "Linear Update Status",
-      description: "Update a Linear issue's status (e.g. 'In Progress', 'Done', 'Todo').",
-      parameters: {
-        type: "object" as const,
-        properties: {
-          issueId: { type: "string", description: "The Linear issue UUID" },
-          status: {
-            type: "string",
-            description: "Target status name (e.g. 'In Progress', 'Done', 'Todo', 'Canceled')",
-          },
-        },
-        required: ["issueId", "status"],
-      },
-      execute: async (_toolCallId: string, { issueId, status }: { issueId: string; status: string }) => {
-        try {
-          await linearApi.updateIssueState(issueId, status)
-          return { content: [{ type: "text", text: `Issue ${issueId} updated to "${status}"` }], details: {} }
-        } catch (err) {
-          return {
-            content: [
-              { type: "text", text: `Failed to update status: ${err instanceof Error ? err.message : String(err)}` },
-            ],
-            details: { status: "failed" },
-          }
-        }
-      },
-    },
-    {
-      name: "linear_get_issue",
-      label: "Linear Get Issue",
-      description: "Get full details of a Linear issue including title, description, comments, and state.",
-      parameters: {
-        type: "object" as const,
-        properties: {
-          issueId: { type: "string", description: "The Linear issue UUID" },
-        },
-        required: ["issueId"],
-      },
-      execute: async (_toolCallId: string, { issueId }: { issueId: string }) => {
-        try {
-          const issue = await linearApi.getIssueDetails(issueId)
-          return { content: [{ type: "text", text: JSON.stringify(issue, null, 2) }], details: {} }
-        } catch (err) {
-          return {
-            content: [
-              { type: "text", text: `Failed to get issue: ${err instanceof Error ? err.message : String(err)}` },
-            ],
-            details: { status: "failed" },
-          }
-        }
-      },
-    },
-  ]
-}
-
-// ---------------------------------------------------------------------------
-// Session lifecycle hooks
-// ---------------------------------------------------------------------------
-
-async function onSubagentEnded(api: OpenClawPluginApi, event: any): Promise<void> {
-  const config = api.pluginConfig as Record<string, unknown> | undefined
-  const sessionPrefix = (config?.sessionPrefix as string) || "linear:"
-
-  const sessionKey = event?.sessionKey as string | undefined
-  if (!sessionKey?.startsWith(sessionPrefix)) return
-
   const tokenInfo = resolveLinearToken(config)
-  if (!tokenInfo.accessToken) return
-
-  // Extract issue ID from session key: "{sessionPrefix}{issueId}"
-  const issueId = sessionKey.slice(sessionPrefix.length)
-  if (!issueId) return
-
-  // Clear the active run guard
-  clearActiveRun(sessionKey, sessionPrefix)
+  if (!tokenInfo.accessToken) return []
 
   const linearApi = new LinearAgentApi(tokenInfo.accessToken, {
     refreshToken: tokenInfo.refreshToken,
@@ -230,48 +229,82 @@ async function onSubagentEnded(api: OpenClawPluginApi, event: any): Promise<void
     logger: api.logger,
   })
 
-  const success = event?.success !== false
-
-  // Emit error activity if session failed
-  if (!success) {
-    const agentSessionId = agentSessionMap.get(issueId)
-    if (agentSessionId) {
-      try {
-        await linearApi.emitActivity(agentSessionId, { type: "error", body: "Agent session failed" })
-      } catch {}
-    }
-  }
-
-  try {
-    if (success) {
-      // Always update status to Done on success (independent of notification preference)
-      try {
-        await linearApi.updateIssueState(issueId, "Done")
-      } catch {
-        // Status update is best-effort
-      }
-
-      // Send notification only if enabled
-      if (config?.notifyOnComplete !== false) {
+  return [
+    {
+      name: "linear_update_status",
+      label: "Linear Update Status",
+      description: "Update the status of a Linear issue (e.g. 'In Progress', 'Done', 'Todo', 'Canceled').",
+      parameters: {
+        type: "object" as const,
+        properties: {
+          issueId: { type: "string", description: "The Linear issue UUID" },
+          status: { type: "string", description: "Target status name" },
+        },
+        required: ["issueId", "status"],
+      },
+      execute: async (_tc: string, { issueId, status }: { issueId: string; status: string }) => {
+        try {
+          await linearApi.updateIssueState(issueId, status)
+          return { content: [{ type: "text", text: `Issue updated to "${status}"` }], details: {} }
+        } catch (err) {
+          return { content: [{ type: "text", text: `Failed: ${err}` }], details: { status: "failed" } }
+        }
+      },
+    },
+    {
+      name: "linear_get_issue",
+      label: "Linear Get Issue",
+      description: "Get full details of a Linear issue.",
+      parameters: {
+        type: "object" as const,
+        properties: {
+          issueId: { type: "string", description: "The Linear issue UUID" },
+        },
+        required: ["issueId"],
+      },
+      execute: async (_tc: string, { issueId }: { issueId: string }) => {
         try {
           const issue = await linearApi.getIssueDetails(issueId)
-          const msg = `✅ Linear issue **[${issue.identifier}] ${issue.title}** completed — please review.\n${issue.url}`
-
-          const target = config?.notificationTarget as string | undefined
-          if (target && api.runtime?.channel) {
-            const channel = api.runtime.channel as any
-            if (typeof channel.sendMessageTelegram === "function") {
-              await channel.sendMessageTelegram(target, msg, { silent: true })
-            }
+          return { content: [{ type: "text", text: JSON.stringify(issue, null, 2) }], details: {} }
+        } catch (err) {
+          return { content: [{ type: "text", text: `Failed: ${err}` }], details: { status: "failed" } }
+        }
+      },
+    },
+    {
+      name: "linear_search_issues",
+      label: "Linear Search Issues",
+      description: "Search for issues in Linear.",
+      parameters: {
+        type: "object" as const,
+        properties: {
+          query: { type: "string", description: "Search query" },
+          limit: { type: "number", description: "Max results (default 10)" },
+        },
+        required: ["query"],
+      },
+      execute: async (_tc: string, { query, limit = 10 }: { query: string; limit?: number }) => {
+        try {
+          // @ts-expect-error — gql is untyped in CI's openclaw version
+    const data = await (linearApi as any).gql<{
+            issueSearch: { nodes: Array<{ id: string; identifier: string; title: string; state: { name: string }; url: string }> }
+          }>(
+            `query SearchIssues($query: String!, $limit: Int) {
+              issueSearch(query: $query, first: $limit) {
+                nodes { id identifier title state { name } url }
+              }
+            }`,
+            { query, limit },
+          )
+          const results = data.issueSearch.nodes.map((i: any) => `[${i.identifier}] ${i.title} (${i.state.name}) ${i.url}`)
+          return {
+            content: [{ type: "text", text: results.length ? results.join("\n") : "No issues found" }],
+            details: {},
           }
         } catch (err) {
-          api.logger.warn(`Linear Light: notification failed: ${err}`)
+          return { content: [{ type: "text", text: `Failed: ${err}` }], details: { status: "failed" } }
         }
-      }
-    }
-  } catch (err) {
-    api.logger.error(`Linear Light: onSubagentEnded failed for ${issueId}: ${err}`)
-  } finally {
-    agentSessionMap.delete(issueId)
-  }
+      },
+    },
+  ]
 }

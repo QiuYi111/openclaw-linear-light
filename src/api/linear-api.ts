@@ -5,10 +5,6 @@
  * Borrowed from openclaw-linear-plugin (calltelemetry/openclaw-linear-plugin).
  */
 
-import { readFileSync, renameSync, writeFileSync } from "node:fs"
-import { homedir } from "node:os"
-import { join } from "node:path"
-
 /**
  * Minimal logger interface matching OpenClaw's api.logger shape.
  */
@@ -21,7 +17,6 @@ export interface Logger {
 
 const LINEAR_GRAPHQL_URL = "https://api.linear.app/graphql"
 const LINEAR_OAUTH_TOKEN_URL = "https://api.linear.app/oauth/token"
-const CYRUS_CONFIG_PATH = join(homedir(), ".cyrus", "config.json")
 const REFRESH_BUFFER_MS = 60_000 // refresh 60s before expiry
 const REFRESH_COOLDOWN_MS = 5_000 // coalesce late-arriving 401s for 5s
 
@@ -40,38 +35,28 @@ export function resolveLinearToken(pluginConfig?: Record<string, unknown>): {
   accessToken: string | null
   refreshToken?: string
   expiresAt?: number
-  source: "config" | "env" | "cyrus" | "none"
+  source: "config" | "none"
 } {
-  // 1. Plugin config
-  const fromConfig = pluginConfig?.accessToken
-  if (typeof fromConfig === "string" && fromConfig) {
-    return { accessToken: fromConfig, source: "config" }
-  }
-
-  // 2. Cyrus config (~/.cyrus/config.json) — reuse existing OAuth token
+  // 1. Plugin-local OAuth token (from ~/.openclaw/plugins/linear-light/token.json)
   try {
-    const cyrusConfig = JSON.parse(readFileSync(CYRUS_CONFIG_PATH, "utf8"))
-
-    const workspaces = cyrusConfig?.linearWorkspaces
-    if (workspaces) {
-      const firstWorkspace = Object.values(workspaces)[0] as any
-      if (firstWorkspace?.linearToken) {
-        return {
-          accessToken: firstWorkspace.linearToken,
-          refreshToken: firstWorkspace.linearRefreshToken,
-          expiresAt: firstWorkspace.linearTokenExpiresAt,
-          source: "cyrus",
-        }
+    const { readStoredToken } = require("./oauth-store.js")
+    const stored = readStoredToken()
+    if (stored?.accessToken) {
+      return {
+        accessToken: stored.accessToken,
+        refreshToken: stored.refreshToken,
+        expiresAt: stored.expiresAt,
+        source: "config" as const,
       }
     }
   } catch {
-    // Cyrus config not available
+    // Plugin token file not available
   }
 
-  // 3. Env var
-  const fromEnv = process.env.LINEAR_ACCESS_TOKEN ?? process.env.LINEAR_API_KEY
-  if (fromEnv) {
-    return { accessToken: fromEnv, source: "env" }
+  // 2. Plugin config accessToken
+  const fromConfig = pluginConfig?.accessToken
+  if (typeof fromConfig === "string" && fromConfig) {
+    return { accessToken: fromConfig, source: "config" }
   }
 
   return { accessToken: null, source: "none" }
@@ -188,30 +173,16 @@ export class LinearAgentApi {
    * Persist refreshed token back to Cyrus config to keep it in sync.
    */
   private persistToken(): void {
-    if (this.tokenSource !== "cyrus") return
-
+    // Persist to plugin-local storage only
     try {
-      const raw = readFileSync(CYRUS_CONFIG_PATH, "utf8")
-      const store = JSON.parse(raw)
-      const workspaces = store?.linearWorkspaces
-      if (!workspaces) return
-
-      const firstKey = Object.keys(workspaces)[0]
-      if (!firstKey) return
-
-      workspaces[firstKey].linearToken = this.accessToken
-      if (this.refreshToken) {
-        workspaces[firstKey].linearRefreshToken = this.refreshToken
-      }
-      if (this.expiresAt) {
-        workspaces[firstKey].linearTokenExpiresAt = this.expiresAt
-      }
-
-      const tmpPath = `${CYRUS_CONFIG_PATH}.tmp`
-      writeFileSync(tmpPath, JSON.stringify(store, null, 2), "utf8")
-      renameSync(tmpPath, CYRUS_CONFIG_PATH)
+      const { writeStoredToken } = require("./oauth-store.js")
+      writeStoredToken({
+        accessToken: this.accessToken,
+        refreshToken: this.refreshToken,
+        expiresAt: this.expiresAt,
+      }, this.logger)
     } catch {
-      // Best-effort persistence
+      // Best-effort
     }
   }
 
@@ -293,11 +264,15 @@ export class LinearAgentApi {
   }
 
   async emitActivity(agentSessionId: string, content: ActivityContent): Promise<void> {
+    const input: Record<string, unknown> = {
+      agentSessionId,
+      content,
+    }
     await this.gql(
       `mutation AgentActivityCreate($input: AgentActivityCreateInput!) {
         agentActivityCreate(input: $input) { success }
       }`,
-      { input: { agentSessionId, content } },
+      { input },
     )
   }
 

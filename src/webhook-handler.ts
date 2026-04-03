@@ -1,52 +1,29 @@
 /**
- * Webhook handler for Linear Light
+ * Webhook handler for Linear Light (Channel Mode)
  *
- * Receives Linear webhooks, filters for @mention events,
- * and dispatches to OpenClaw agent sessions.
- *
- * Supports two webhook types:
- * 1. Comment events (Issue type) — user @mentions the agent
- * 2. Agent session events — Linear's built-in agent session lifecycle
+ * Receives Linear webhooks, dispatches inbound messages to OpenClaw
+ * via dispatchInboundReplyWithBase(). Agent replies are delivered back
+ * to Linear via the outbound adapter (sendText → createComment).
  */
 
 import { createHmac, timingSafeEqual } from "node:crypto"
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk"
+import {
+  // @ts-expect-error — exported from local plugin-sdk but may not be in CI's version
+  dispatchInboundReplyWithBase,
+  type OpenClawConfig,
+} from "openclaw/plugin-sdk"
 import { LinearAgentApi, resolveLinearToken } from "./api/linear-api.js"
 import { sanitizePromptInput } from "./utils.js"
+import { getLinearRuntime, setLinearApi } from "./runtime.js"
+import { agentSessionMap } from "../index.js"
+
+const CHANNEL_ID = "linear" as const
 
 // Dedup tracking
 const recentlyProcessed = new Map<string, number>()
-
-// Maps issueId → Linear agent session ID, so tools can emit activity updates
-export const agentSessionMap = new Map<string, string>()
 const DEDUP_TTL_MS = 60_000
 let lastSweep = Date.now()
-
-// Concurrent run guard — prevents two webhooks for the same issue from spawning
-// parallel agent sessions (e.g. "created" followed quickly by "prompted").
-// Uses timestamps so stale entries expire after ACTIVE_RUN_TTL_MS even if
-// clearActiveRun is never called (e.g. process crash, hook registration failure).
-const activeRuns = new Map<string, number>()
-export const ACTIVE_RUN_TTL_MS = 30 * 60_000 // 30 minutes
-
-export function clearActiveRun(sessionKey: string, prefix = "linear:"): void {
-  if (sessionKey.startsWith(prefix)) {
-    activeRuns.delete(sessionKey)
-  }
-}
-
-function isSessionActive(sessionKey: string): boolean {
-  const now = Date.now()
-  // Sweep expired entries on every check
-  for (const [k, ts] of activeRuns) {
-    if (now - ts > ACTIVE_RUN_TTL_MS) activeRuns.delete(k)
-  }
-  return activeRuns.has(sessionKey)
-}
-
-function markSessionActive(sessionKey: string): void {
-  activeRuns.set(sessionKey, Date.now())
-}
 
 function wasRecentlyProcessed(key: string): boolean {
   const now = Date.now()
@@ -61,22 +38,15 @@ function wasRecentlyProcessed(key: string): boolean {
   return false
 }
 
-/**
- * Verify Linear webhook signature.
- * Linear uses HMAC-SHA256 with the webhook signing secret.
- */
 function verifySignature(rawBody: Buffer, signature: string, secret: string): boolean {
-  const expected = createHmac("sha256", secret).update(rawBody).digest("base64")
+  const expected = createHmac("sha256", secret).update(rawBody).digest("hex")
   try {
-    return timingSafeEqual(Buffer.from(signature, "base64"), Buffer.from(expected, "base64"))
+    return timingSafeEqual(Buffer.from(signature, "utf8"), Buffer.from(expected, "utf8"))
   } catch {
     return false
   }
 }
 
-/**
- * Read JSON body from request (Node.js IncomingMessage style)
- */
 async function readBody(
   req: any,
   maxBytes = 1_000_000,
@@ -85,25 +55,13 @@ async function readBody(
     const chunks: Buffer[] = []
     let total = 0
     let settled = false
-
-    const timer = setTimeout(() => {
-      if (settled) return
-      settled = true
-      resolve({ ok: false, error: "timeout" })
-    }, 5000)
-
+    const timer = setTimeout(() => { if (!settled) { settled = true; resolve({ ok: false, error: "timeout" }) } }, 5000)
     req.on("data", (chunk: Buffer) => {
       if (settled) return
       total += chunk.length
-      if (total > maxBytes) {
-        settled = true
-        clearTimeout(timer)
-        resolve({ ok: false, error: "too large" })
-        return
-      }
+      if (total > maxBytes) { settled = true; clearTimeout(timer); resolve({ ok: false, error: "too large" }); return }
       chunks.push(chunk)
     })
-
     req.on("end", () => {
       if (settled) return
       settled = true
@@ -111,35 +69,22 @@ async function readBody(
       try {
         const rawBuffer = Buffer.concat(chunks)
         resolve({ ok: true, body: JSON.parse(rawBuffer.toString("utf8")), rawBuffer })
-      } catch {
-        resolve({ ok: false, error: "invalid json" })
-      }
+      } catch { resolve({ ok: false, error: "invalid json" }) }
     })
-
-    req.on("error", () => {
-      if (settled) return
-      settled = true
-      clearTimeout(timer)
-      resolve({ ok: false, error: "read error" })
-    })
+    req.on("error", () => { if (!settled) { settled = true; clearTimeout(timer); resolve({ ok: false, error: "read error" }) } })
   })
 }
 
-/**
- * Main webhook handler
- */
 export async function handleWebhook(api: OpenClawPluginApi, req: any, res: any): Promise<void> {
   const config = api.pluginConfig as Record<string, unknown> | undefined
-  const secret = (config?.webhookSecret as string) || process.env.LINEAR_WEBHOOK_SECRET
+  const secret = config?.webhookSecret as string | undefined
 
   if (!secret) {
-    api.logger.error("Linear Light: no webhook secret configured")
     res.writeHead(500, { "Content-Type": "application/json" })
-    res.end(JSON.stringify({ error: "no webhook secret configured" }))
+    res.end(JSON.stringify({ error: "no webhook secret" }))
     return
   }
 
-  // Verify signature
   const signature = req.headers["linear-signature"] as string
   if (!signature) {
     res.writeHead(401, { "Content-Type": "application/json" })
@@ -161,11 +106,7 @@ export async function handleWebhook(api: OpenClawPluginApi, req: any, res: any):
     return
   }
 
-  // Dedup — use payload-type-aware ID
-  const eventId =
-    body.agentSession?.id || // AgentSessionEvent
-    body.data?.id || // Comment / Issue
-    body.createdAt
+  const eventId = body.agentSession?.id || body.data?.id || body.createdAt
   const dedupKey = `${body.type}:${body.action}:${eventId}`
   if (wasRecentlyProcessed(dedupKey)) {
     res.writeHead(200, { "Content-Type": "application/json" })
@@ -186,356 +127,254 @@ export async function handleWebhook(api: OpenClawPluginApi, req: any, res: any):
   }
 }
 
-/**
- * Route webhook payload to appropriate handler
- */
-async function processWebhook(
-  api: OpenClawPluginApi,
-  payload: any,
-  config: Record<string, unknown> | undefined,
-): Promise<void> {
+async function processWebhook(api: OpenClawPluginApi, payload: any, config: Record<string, unknown> | undefined): Promise<void> {
   const { type, action } = payload
 
-  // Agent session events — Linear's built-in agent session lifecycle
   if (type === "AgentSessionEvent") {
-    await handleAgentSessionEvent(api, payload, config)
+    if (action === "created") await handleSessionCreated(api, payload, config)
+    else if (action === "prompted") await handleSessionPrompted(api, payload, config)
     return
   }
 
-  // Comment on issue — check for @mention
   if (type === "Comment" && action === "create") {
     await handleCommentCreate(api, payload, config)
     return
   }
-
-  // Issue events — state changes, assignments, etc.
-  if (type === "Issue") {
-    // Could handle state change notifications here in the future
-    return
-  }
-
-  api.logger.debug?.(`Linear Light: unhandled event ${type}/${action}`)
 }
 
-/**
- * Handle Agent Session events from Linear
- * These are the primary trigger when user @mentions the agent in a comment
- */
-async function handleAgentSessionEvent(
-  api: OpenClawPluginApi,
-  payload: any,
-  config: Record<string, unknown> | undefined,
-): Promise<void> {
-  const { action } = payload
+// ---------------------------------------------------------------------------
+// Agent Session events (primary trigger — user @mentions agent)
+// ---------------------------------------------------------------------------
 
-  if (action === "created") {
-    await handleSessionCreated(api, payload, config)
-  } else if (action === "prompted") {
-    await handleSessionPrompted(api, payload, config)
-  }
-}
-
-/**
- * Handle agent session created — user @mentioned the agent
- */
-async function handleSessionCreated(
-  api: OpenClawPluginApi,
-  payload: any,
-  config: Record<string, unknown> | undefined,
-): Promise<void> {
+async function handleSessionCreated(api: OpenClawPluginApi, payload: any, config: Record<string, unknown> | undefined): Promise<void> {
   const session = payload.agentSession
-  if (!session?.issue) {
-    api.logger.debug?.("Linear Light: session created without issue, skipping")
-    return
-  }
+  if (!session?.issue) return
 
   const issue = session.issue
-
-  // Validate required issue fields — malformed payload would crash downstream
-  if (!(issue.id && issue.title && issue.identifier)) {
-    api.logger.warn("Linear Light: malformed session payload — missing issue.id/title/identifier")
-    return
-  }
+  if (!(issue.id && issue.title && issue.identifier)) return
 
   const comment = session.comment
-  const issueId = issue.id
-  const sessionPrefix = (config?.sessionPrefix as string) || "linear:"
-  const sessionKey = `${sessionPrefix}${issueId}`
-
-  // Guard: skip if an agent is already running for this issue
-  if (isSessionActive(sessionKey)) {
-    api.logger.info(`Linear Light: agent already running for ${issue.identifier}, skipping`)
-    return
-  }
-  markSessionActive(sessionKey)
-
-  // Determine prompt content
-  // If triggered by @mention, use the comment body
-  // Otherwise use the issue description
   const AGENT_SESSION_MARKER = "This thread is for an agent session"
   const commentBody = comment?.body
   const isMentionTriggered = commentBody && !commentBody.includes(AGENT_SESSION_MARKER)
   const prompt = isMentionTriggered ? commentBody : issue.description || issue.title
 
-  // Store agent session ID for activity emission
-  const agentSessionId = session.id as string | undefined
-  if (agentSessionId) {
-    agentSessionMap.set(issueId, agentSessionId)
-  }
-
-  api.logger.info(`Linear Light: session created for ${issue.identifier} (${isMentionTriggered ? "mention" : "auto"})`)
-
-  // Resolve Linear API for status update and activity emission
-  const tokenInfo = resolveLinearToken(config)
-  const apiOpts = {
-    refreshToken: tokenInfo.refreshToken,
-    expiresAt: tokenInfo.expiresAt,
-    clientId: (config?.linearClientId as string) || process.env.LINEAR_CLIENT_ID,
-    clientSecret: (config?.linearClientSecret as string) || process.env.LINEAR_CLIENT_SECRET,
-    source: tokenInfo.source,
-  }
+  // Store agent session ID for emitActivity
+  if (session.id) agentSessionMap.set(issue.id, session.id)
 
   // Update issue status to In Progress
-  let rollbackApi: LinearAgentApi | null = null
-  let movedToInProgress = false
-  if (config?.autoInProgress !== false && tokenInfo.accessToken) {
+  const linearApi = makeLinearApi(config, api)
+  if (config?.autoInProgress !== false && linearApi) {
     try {
-      const linearApi = new LinearAgentApi(tokenInfo.accessToken, apiOpts)
-      await linearApi.updateIssueState(issueId, "In Progress")
-      rollbackApi = linearApi
-      movedToInProgress = true
+      await linearApi.updateIssueState(issue.id, "In Progress")
       api.logger.info(`Linear Light: ${issue.identifier} → In Progress`)
     } catch (err) {
       api.logger.warn(`Linear Light: failed to update status: ${err}`)
     }
   }
 
-  // Build the message for the agent
-  const safeTitle = sanitizePromptInput(issue.title, 200)
-  const safeDescription = issue.description ? sanitizePromptInput(issue.description) : ""
-  const sanitizedPrompt = sanitizePromptInput(prompt)
-
-  const message = [
-    `[Linear Issue ${issue.identifier}] ${safeTitle}`,
-    safeDescription ? `\n---\n${safeDescription}` : "",
-    isMentionTriggered ? `\n---\n**User comment:**\n${sanitizedPrompt}` : "",
-    `\n---\nIssue URL: ${issue.url}`,
-    `\nUse linear_comment() to reply on the issue, linear_update_status() to change status.`,
-    `\nWhen done, update status to "Done" and I'll notify the user for review.`,
-  ].join("\n")
-
-  // Dispatch to OpenClaw agent with session key for continuity
-  try {
-    await api.runtime.subagent.run({
-      message,
-      sessionKey,
-    })
-  } catch (err) {
-    clearActiveRun(sessionKey)
-    agentSessionMap.delete(issueId)
-    if (movedToInProgress && rollbackApi) {
-      try {
-        await rollbackApi.updateIssueState(issueId, "Todo")
-        api.logger.info(`Linear Light: ${issue.identifier} rolled back → Todo`)
-      } catch (rollbackErr) {
-        api.logger.warn(`Linear Light: failed to rollback status: ${rollbackErr}`)
-      }
-    }
-    throw err
-  }
-
-  // Emit initial activity so Linear shows the session as active
-  if (agentSessionId && tokenInfo.accessToken) {
+  // Emit initial response activity immediately — Linear times out after ~15s
+  if (session.id && linearApi) {
     try {
-      const linearApi = new LinearAgentApi(tokenInfo.accessToken, apiOpts)
-      await linearApi.emitActivity(agentSessionId, {
-        type: "thought",
-        body: `Starting work on ${issue.identifier}: ${issue.title}`,
+      await linearApi.emitActivity(session.id, {
+        type: "response",
+        body: `已收到，正在处理 ${issue.identifier}: ${issue.title}`,
       })
+      api.logger.info(`Linear Light: emitted initial activity for ${issue.identifier}`)
     } catch (err) {
       api.logger.warn(`Linear Light: failed to emit initial activity: ${err}`)
     }
   }
 
-  api.logger.info(`Linear Light: dispatched agent for ${issue.identifier}`)
+  const safeTitle = sanitizePromptInput(issue.title, 200)
+  const safeDescription = issue.description ? sanitizePromptInput(issue.description) : ""
+  const sanitizedPrompt = sanitizePromptInput(prompt)
+
+  const body = [
+    `[Linear Issue ${issue.identifier}] ${safeTitle}`,
+    safeDescription ? `\n---\nDescription:\n${safeDescription}` : "",
+    isMentionTriggered ? `\n---\n**User comment:**\n${sanitizedPrompt}` : "",
+    `\n---\nIssue URL: ${issue.url}`,
+    ``,
+    `【身份】你是 Openclaw，一个 Linear 工作流助手。不要使用个人助手身份（如 Linus）回复。`,
+    `可用工具：linear_update_status（改状态）、linear_get_issue（查详情）、linear_search_issues（搜索）。`,
+    `【重要】不要主动修改 issue 状态（尤其不要标 Done），除非用户明确要求。`,
+  ].join("\n")
+
+  await dispatchToAgent(api, { issue, body, config })
 }
 
-/**
- * Handle follow-up prompts in an agent session (user replies in the issue thread)
- */
-async function handleSessionPrompted(
-  api: OpenClawPluginApi,
-  payload: any,
-  config: Record<string, unknown> | undefined,
-): Promise<void> {
+async function handleSessionPrompted(api: OpenClawPluginApi, payload: any, config: Record<string, unknown> | undefined): Promise<void> {
   const session = payload.agentSession
   const activity = payload.agentActivity
 
-  if (!(session?.issue && activity?.content?.body)) {
-    return
-  }
+  if (!(session?.issue && activity?.content?.body)) return
+  if (!(session.issue.id && session.issue.identifier)) return
+  if (activity.signal === "stop") return
 
-  // Validate required fields — malformed payload would crash downstream
-  if (!(session.issue.id && session.issue.identifier)) {
-    api.logger.warn("Linear Light: malformed prompted payload — missing issue.id/identifier")
-    return
-  }
-
-  // Check for stop signal
-  if (activity.signal === "stop") {
-    api.logger.info(`Linear Light: stop signal for issue ${session.issue.identifier}`)
-    return
-  }
-
-  const issueId = session.issue.id
-  const sessionPrefix = (config?.sessionPrefix as string) || "linear:"
-  const sessionKey = `${sessionPrefix}${issueId}`
-
-  // Guard: skip if an agent is already running for this issue
-  if (isSessionActive(sessionKey)) {
-    api.logger.info(`Linear Light: agent already running for ${session.issue.identifier}, skipping follow-up`)
-    return
-  }
-  markSessionActive(sessionKey)
-
-  // Ensure agent session ID is available for activity emission
-  const agentSessionId = session.id as string | undefined
-  if (agentSessionId) {
-    agentSessionMap.set(issueId, agentSessionId)
-  }
+  if (session.id) agentSessionMap.set(session.issue.id, session.id)
 
   const prompt = sanitizePromptInput(activity.content.body)
+  const body = [
+    `[Linear ${session.issue.identifier} follow-up]`,
+    prompt,
+    ``,
+    `【身份】你是 Openclaw，一个 Linear 工作流助手。不要使用个人助手身份（如 Linus）回复。`,
+  ].join("\n")
 
-  const message = [`[Linear ${session.issue.identifier} follow-up]`, prompt].join("\n")
-
-  try {
-    await api.runtime.subagent.run({
-      message,
-      sessionKey,
-    })
-  } catch (err) {
-    clearActiveRun(sessionKey)
-    agentSessionMap.delete(issueId)
-    throw err
-  }
-
-  api.logger.info(`Linear Light: follow-up dispatched for ${session.issue.identifier}`)
+  await dispatchToAgent(api, { issue: session.issue, body, config })
 }
 
-/**
- * Handle comment create events (fallback for non-agent-session setups).
- * If the comment contains the trigger text, treat it as a request.
- * This path is used when Linear Agent Sessions are not available —
- * the webhook receives Comment events directly instead of AgentSessionEvent.
- */
-async function handleCommentCreate(
-  api: OpenClawPluginApi,
-  payload: any,
-  config: Record<string, unknown> | undefined,
-): Promise<void> {
+// ---------------------------------------------------------------------------
+// Comment fallback (non-agent-session setups)
+// ---------------------------------------------------------------------------
+
+async function handleCommentCreate(api: OpenClawPluginApi, payload: any, config: Record<string, unknown> | undefined): Promise<void> {
   const comment = payload.data
   if (!(comment?.body && comment?.issue?.id)) return
 
   const trigger = (config?.mentionTrigger as string) || "Linus"
-  const body = comment.body.toLowerCase()
+  if (!comment.body.toLowerCase().includes(trigger.toLowerCase())) return
 
-  if (!body.includes(trigger.toLowerCase())) {
-    return
-  }
-
-  // Skip comments authored by the bot itself to prevent self-triggering loops.
-  // Linear webhooks include an `actor` field identifying who triggered the event.
   const botUserId = (config?.botUserId as string) || process.env.LINEAR_BOT_USER_ID
-  if (botUserId) {
-    const actorId = payload.actor?.id as string | undefined
-    if (actorId && actorId === botUserId) {
-      api.logger.debug?.(`Linear Light: skipping bot-authored comment (actor=${actorId})`)
-      return
-    }
-  }
+  if (botUserId && payload.actor?.id === botUserId) return
 
   const issueId = comment.issue.id
-  const sessionPrefix = (config?.sessionPrefix as string) || "linear:"
-  const sessionKey = `${sessionPrefix}${issueId}`
-
-  // Guard: skip if an agent is already running for this issue
-  if (isSessionActive(sessionKey)) {
-    api.logger.info(`Linear Light: agent already running for issue ${issueId}, skipping`)
-    return
-  }
-  markSessionActive(sessionKey)
-
-  api.logger.info(`Linear Light: comment trigger detected (fallback path) for issue ${issueId}`)
-
-  // Resolve Linear API to fetch full issue details and update status
-  const tokenInfo = resolveLinearToken(config)
-  if (!tokenInfo.accessToken) {
-    api.logger.warn("Linear Light: comment fallback triggered but no Linear API token available")
-    clearActiveRun(sessionKey)
-    return
-  }
-
-  const linearApi = new LinearAgentApi(tokenInfo.accessToken, {
-    refreshToken: tokenInfo.refreshToken,
-    expiresAt: tokenInfo.expiresAt,
-    clientId: (config?.linearClientId as string) || process.env.LINEAR_CLIENT_ID,
-    clientSecret: (config?.linearClientSecret as string) || process.env.LINEAR_CLIENT_SECRET,
-    source: tokenInfo.source,
-  })
+  const linearApi = makeLinearApi(config, api)
+  if (!linearApi) return
 
   let issue: Awaited<ReturnType<LinearAgentApi["getIssueDetails"]>>
   try {
     issue = await linearApi.getIssueDetails(issueId)
   } catch (err) {
     api.logger.error(`Linear Light: failed to fetch issue ${issueId}: ${err}`)
-    clearActiveRun(sessionKey)
     return
   }
 
-  // Update issue status to In Progress
-  let movedToInProgress = false
   if (config?.autoInProgress !== false) {
-    try {
-      await linearApi.updateIssueState(issueId, "In Progress")
-      movedToInProgress = true
-      api.logger.info(`Linear Light: ${issue.identifier} → In Progress`)
-    } catch (err) {
-      api.logger.warn(`Linear Light: failed to update status: ${err}`)
-    }
+    try { await linearApi.updateIssueState(issueId, "In Progress") } catch { /* best-effort */ }
   }
 
-  // Build the message for the agent
   const sanitizedPrompt = sanitizePromptInput(comment.body)
   const safeTitle = sanitizePromptInput(issue.title, 200)
   const safeDescription = issue.description ? sanitizePromptInput(issue.description) : ""
 
-  const message = [
+  const body = [
     `[Linear Issue ${issue.identifier}] ${safeTitle}`,
-    safeDescription ? `\n---\n${safeDescription}` : "",
+    safeDescription ? `\n---\nDescription:\n${safeDescription}` : "",
     `\n---\n**User comment:**\n${sanitizedPrompt}`,
     `\n---\nIssue URL: ${issue.url}`,
-    `\nUse linear_comment() to reply on the issue, linear_update_status() to change status.`,
-    `\nWhen done, update status to "Done" and I'll notify the user for review.`,
+    ``,
+    `【身份】你是 Openclaw，一个 Linear 工作流助手。不要使用个人助手身份（如 Linus）回复。`,
   ].join("\n")
 
-  // Dispatch to OpenClaw agent with session key for continuity
-  try {
-    await api.runtime.subagent.run({
-      message,
-      sessionKey,
-    })
-  } catch (err) {
-    clearActiveRun(sessionKey)
-    if (movedToInProgress) {
-      try {
-        await linearApi.updateIssueState(issueId, "Todo")
-        api.logger.info(`Linear Light: ${issue.identifier} rolled back → Todo`)
-      } catch (rollbackErr) {
-        api.logger.warn(`Linear Light: failed to rollback status: ${rollbackErr}`)
-      }
+  await dispatchToAgent(api, { issue, body, config })
+}
+
+// ---------------------------------------------------------------------------
+// Core: dispatch message to OpenClaw agent via channel injection
+// ---------------------------------------------------------------------------
+
+async function dispatchToAgent(
+  api: OpenClawPluginApi,
+  params: {
+    issue: { id: string; identifier: string; title: string; description?: string | null; url?: string }
+    body: string
+    config: Record<string, unknown> | undefined
+  },
+): Promise<void> {
+  const { issue, body, config } = params
+  const core = getLinearRuntime()
+  const cfg = api.config as OpenClawConfig
+
+  // Use issue identifier as peer ID (e.g. "DEV-134")
+  const peerId = issue.identifier
+
+  const route = core.channel.routing.resolveAgentRoute({
+    cfg,
+    channel: CHANNEL_ID,
+    accountId: "default",
+    peer: { kind: "direct", id: peerId },
+  })
+
+  api.logger.info(`Linear Light: route resolved: agentId=${route.agentId} sessionKey=${route.sessionKey} model=${route.model}`)
+
+  const storePath = core.channel.session.resolveStorePath(
+    (cfg as any).session?.store,
+    { agentId: route.agentId },
+  )
+
+  const ctxPayload = core.channel.reply.finalizeInboundContext({
+    Body: body,
+    RawBody: body,
+    CommandBody: body,
+    From: `linear:issue:${peerId}`,
+    To: `linear:${peerId}`,
+    SessionKey: route.sessionKey,
+    AccountId: route.accountId,
+    ChatType: "direct",
+    ConversationLabel: `Linear ${issue.identifier}`,
+    SenderName: "Linear",
+    Provider: CHANNEL_ID,
+    Surface: CHANNEL_ID,
+    Timestamp: Date.now(),
+    OriginatingChannel: CHANNEL_ID,
+    OriginatingTo: `linear:${peerId}`,
+  })
+
+  // Deliver callback: send agent reply back to Linear as a comment
+  const deliver = async (payload: { text?: string; mediaUrls?: string[]; replyToId?: string }) => {
+    if (!payload.text) return
+    const api2 = makeLinearApi(config, api)
+    if (!api2) {
+      api.logger.error(`Linear Light: deliver failed — no access token for ${issue.identifier}`)
+      return
     }
-    throw err
+    try {
+      await api2.createComment(issue.id, payload.text)
+      api.logger.info(`Linear Light: delivered comment to ${issue.identifier}`)
+    } catch (err) {
+      api.logger.error(`Linear Light: deliver error for ${issue.identifier}: ${err instanceof Error ? err.message : String(err)}`)
+    }
   }
 
-  api.logger.info(`Linear Light: dispatched agent for ${issue.identifier} (comment fallback)`)
+  await dispatchInboundReplyWithBase({
+    cfg,
+    channel: CHANNEL_ID,
+    accountId: "default",
+    route,
+    storePath,
+    ctxPayload,
+    core: {
+      channel: {
+        session: {
+          recordInboundSession: core.channel.session.recordInboundSession,
+        },
+        reply: {
+          dispatchReplyWithBufferedBlockDispatcher: core.channel.reply.dispatchReplyWithBufferedBlockDispatcher,
+        },
+      },
+    },
+    deliver,
+    onRecordError: (err: unknown) => api.logger.error(`Linear Light: record inbound error: ${String(err)}`),
+    onDispatchError: (err: unknown, info: { kind: string }) => api.logger.error(`Linear Light: dispatch error [${info.kind}]: ${String(err)}`),
+  })
+
+  api.logger.info(`Linear Light: dispatched agent for ${issue.identifier} (channel mode)`)
+}
+
+function makeLinearApi(config: Record<string, unknown> | undefined, api: OpenClawPluginApi) {
+  const tokenInfo = resolveLinearToken(config)
+  if (!tokenInfo.accessToken) return null
+  const linearApi = new LinearAgentApi(tokenInfo.accessToken, {
+    refreshToken: tokenInfo.refreshToken,
+    expiresAt: tokenInfo.expiresAt,
+    clientId: (config?.linearClientId as string) || process.env.LINEAR_CLIENT_ID,
+    clientSecret: (config?.linearClientSecret as string) || process.env.LINEAR_CLIENT_SECRET,
+    source: tokenInfo.source,
+    logger: api.logger,
+  })
+  // Share the API instance for activity streaming hooks
+  setLinearApi(linearApi)
+  return linearApi
 }

@@ -1,13 +1,12 @@
 {
   "id": "linear-light",
   "name": "Linear Light",
-  "description": "Lightweight Linear integration — @mention triggers task sessions with status management and notifications",
+  "description": "Lightweight Linear integration \u2014 @mention triggers task sessions with status management and notifications",
   "version": "0.1.0",
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
     "properties": {
-      "enabled": { "type": "boolean", "default": true },
       "webhookSecret": {
         "type": "string",
         "description": "Linear webhook signing secret",
