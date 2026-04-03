@@ -17,32 +17,8 @@ My setup:
 
 Steps:
 1. Clone https://github.com/QiuYi111/openclaw-linear-light
-2. Install the plugin: `openclaw plugins install ./openclaw-linear-light`
-3. Help me create a Linear OAuth app (Settings → API → OAuth Applications → Create new):
-   - Redirect URL: `https://<your-gateway-host>/linear-light/oauth/callback`
-   - Webhook URL: `https://<your-gateway-host>/linear-light/webhook`
-   - Enable webhooks for Agent session events and Issues
-4. Add the Client ID, Client Secret, and Webhook Signing Secret to `openclaw.config.json5`:
-   ```json5
-   {
-     plugins: {
-       entries: {
-         "linear-light": {
-           config: {
-             enabled: true,
-             webhookSecret: "<webhook signing secret>",
-             mentionTrigger: "Linus",
-             autoInProgress: true,
-             linearClientId: "<OAuth client ID>",
-             linearClientSecret: "<OAuth client secret>",
-           }
-         }
-       }
-     }
-   }
-   ```
-5. Restart the gateway: `openclaw gateway restart`
-6. Visit `https://<your-gateway-host>/linear-light/oauth/init` to authorize
+2. Install the skill
+3. /linear-light-setup
 7. Verify: `GET https://<your-gateway-host>/linear-light/status` should return `"status": "ok"`
 ````
 
