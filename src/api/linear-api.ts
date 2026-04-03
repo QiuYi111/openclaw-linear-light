@@ -71,7 +71,6 @@ export class LinearAgentApi {
   private expiresAt?: number
   private clientId?: string
   private clientSecret?: string
-  private tokenSource?: string
   private logger: Logger
   private refreshPromise: Promise<void> | null = null
   private refreshSuccessTime: number = 0
@@ -92,7 +91,6 @@ export class LinearAgentApi {
     this.expiresAt = opts?.expiresAt
     this.clientId = opts?.clientId
     this.clientSecret = opts?.clientSecret
-    this.tokenSource = opts?.source
     this.logger = opts?.logger ?? (console as unknown as Logger)
   }
 
@@ -176,11 +174,14 @@ export class LinearAgentApi {
     // Persist to plugin-local storage only
     try {
       const { writeStoredToken } = require("./oauth-store.js")
-      writeStoredToken({
-        accessToken: this.accessToken,
-        refreshToken: this.refreshToken,
-        expiresAt: this.expiresAt,
-      }, this.logger)
+      writeStoredToken(
+        {
+          accessToken: this.accessToken,
+          refreshToken: this.refreshToken,
+          expiresAt: this.expiresAt,
+        },
+        this.logger,
+      )
     } catch {
       // Best-effort
     }

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import { beforeEach, describe, expect, it, vi } from "vitest"
 
 // ---------------------------------------------------------------------------
 // Linear API client unit tests
@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 const mockFetch = vi.fn()
 vi.stubGlobal("fetch", mockFetch)
 
-// Mock fs for resolveLinearToken and persistToCyrusConfig
+// Mock fs for resolveLinearToken and persistToken (via oauth-store)
 const mockReadFileSync = vi.fn()
 const mockWriteFileSync = vi.fn()
 const mockRenameSync = vi.fn()
@@ -17,6 +17,10 @@ vi.mock("node:fs", () => ({
   writeFileSync: mockWriteFileSync,
   renameSync: mockRenameSync,
 }))
+
+// We don't mock oauth-store directly — instead we mock node:fs,
+// so the actual oauth-store code uses our mocked fs functions.
+// This avoids issues with require() mock interception in ESM mode.
 
 const mockLogger = {
   info: vi.fn(),
@@ -903,17 +907,17 @@ describe("LinearAgentApi", () => {
   })
 
   describe("persistToken", () => {
-    it("skips persistence when tokenSource is not 'cyrus'", async () => {
+    it("does not throw when persistence fails (best-effort)", async () => {
+      // persistToken wraps require + writeStoredToken in try/catch.
+      // If oauth-store is unavailable, the refresh still succeeds.
       const { LinearAgentApi } = await import("../api/linear-api.js")
       const api = new LinearAgentApi("old-token", {
         refreshToken: "old-refresh",
         clientId: "cid",
         clientSecret: "csec",
         expiresAt: Date.now() - 1000,
-        source: "config", // not cyrus
       })
 
-      // Refresh call
       mockFetch.mockResolvedValueOnce({
         ok: true,
         json: () =>
@@ -923,425 +927,57 @@ describe("LinearAgentApi", () => {
             expires_in: 3600,
           }),
       })
-      // API call
       mockFetch.mockResolvedValueOnce({
         ok: true,
         json: () => Promise.resolve({ data: { teams: { nodes: [] } } }),
       })
 
-      await api.getTeams()
-
-      // Should NOT write to any file
-      expect(mockWriteFileSync).not.toHaveBeenCalled()
-      expect(mockRenameSync).not.toHaveBeenCalled()
-    })
-
-    it("uses write-then-rename for atomic persistence", async () => {
-      const { LinearAgentApi } = await import("../api/linear-api.js")
-
-      mockReadFileSync.mockReturnValue(
-        JSON.stringify({
-          linearWorkspaces: {
-            workspaceKey: {
-              linearToken: "old-token",
-              linearRefreshToken: "old-refresh",
-              linearTokenExpiresAt: 1000,
-            },
-          },
-        }),
-      )
-
-      const api = new LinearAgentApi("old-token", {
-        refreshToken: "old-refresh",
-        clientId: "cid",
-        clientSecret: "csec",
-        expiresAt: Date.now() - 1000,
-        source: "cyrus",
-      })
-
-      // Refresh call
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: () =>
-          Promise.resolve({
-            access_token: "new-token",
-            refresh_token: "new-refresh",
-            expires_in: 7200,
-          }),
-      })
-      // API call
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: () => Promise.resolve({ data: { teams: { nodes: [] } } }),
-      })
-
-      await api.getTeams()
-
-      // writeFileSync called once with .tmp path
-      expect(mockWriteFileSync).toHaveBeenCalledTimes(1)
-      const [tmpPath, content] = mockWriteFileSync.mock.calls[0]
-      expect(tmpPath).toMatch(/\.tmp$/)
-
-      // renameSync called to atomically replace
-      expect(mockRenameSync).toHaveBeenCalledTimes(1)
-      expect(mockRenameSync).toHaveBeenCalledWith(tmpPath, expect.stringMatching(/config\.json$/))
-
-      // Verify written content has updated tokens
-      const parsed = JSON.parse(content)
-      const ws = parsed.linearWorkspaces.workspaceKey
-      expect(ws.linearToken).toBe("new-token")
-      expect(ws.linearRefreshToken).toBe("new-refresh")
-      expect(ws.linearTokenExpiresAt).toBeGreaterThan(0)
-    })
-
-    it("gracefully handles corrupted Cyrus config file", async () => {
-      const { LinearAgentApi } = await import("../api/linear-api.js")
-
-      // Config file exists but is malformed JSON
-      mockReadFileSync.mockReturnValue("not valid json {{{")
-
-      const api = new LinearAgentApi("old-token", {
-        refreshToken: "old-refresh",
-        clientId: "cid",
-        clientSecret: "csec",
-        expiresAt: Date.now() - 1000,
-        source: "cyrus",
-      })
-
-      // Refresh call
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: () =>
-          Promise.resolve({
-            access_token: "new-token",
-            refresh_token: "new-refresh",
-            expires_in: 3600,
-          }),
-      })
-      // API call
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: () => Promise.resolve({ data: { teams: { nodes: [] } } }),
-      })
-
-      // Should NOT throw — persistToken silently catches errors
-      await api.getTeams()
-      expect(mockWriteFileSync).not.toHaveBeenCalled()
-    })
-
-    it("gracefully handles missing Cyrus config file during persistence", async () => {
-      const { LinearAgentApi } = await import("../api/linear-api.js")
-
-      // readFileSync throws during persistToken (file deleted between resolve and persist)
-      let callCount = 0
-      mockReadFileSync.mockImplementation(() => {
-        callCount++
-        if (callCount === 1) {
-          // First call: resolveLinearToken succeeds
-          return JSON.stringify({
-            linearWorkspaces: { default: { linearToken: "old" } },
-          })
-        }
-        // Second call: persistToken fails (file deleted)
-        throw new Error("ENOENT")
-      })
-
-      const api = new LinearAgentApi("old-token", {
-        refreshToken: "old-refresh",
-        clientId: "cid",
-        clientSecret: "csec",
-        expiresAt: Date.now() - 1000,
-        source: "cyrus",
-      })
-
-      // Refresh call
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: () =>
-          Promise.resolve({
-            access_token: "new-token",
-            refresh_token: "new-refresh",
-            expires_in: 3600,
-          }),
-      })
-      // API call
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: () => Promise.resolve({ data: { teams: { nodes: [] } } }),
-      })
-
-      // Should NOT throw — persistToken silently catches errors
+      // Should NOT throw even though persistToken's require/write may fail
       await api.getTeams()
     })
 
-    it("skips persistence when linearWorkspaces is empty", async () => {
+    it("does not persist when no refresh happens", async () => {
       const { LinearAgentApi } = await import("../api/linear-api.js")
-
-      mockReadFileSync.mockReturnValue(
-        JSON.stringify({
-          linearWorkspaces: {}, // empty
-        }),
-      )
-
-      const api = new LinearAgentApi("old-token", {
-        refreshToken: "old-refresh",
+      const api = new LinearAgentApi("valid-token", {
+        refreshToken: "refresh",
         clientId: "cid",
         clientSecret: "csec",
-        expiresAt: Date.now() - 1000,
-        source: "cyrus",
+        expiresAt: Date.now() + 3600_000,
       })
 
-      // Refresh call
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: () =>
-          Promise.resolve({
-            access_token: "new-token",
-            refresh_token: "new-refresh",
-            expires_in: 3600,
-          }),
-      })
-      // API call
       mockFetch.mockResolvedValueOnce({
         ok: true,
         json: () => Promise.resolve({ data: { teams: { nodes: [] } } }),
       })
 
       await api.getTeams()
-
-      // No write since there's no workspace key to update
-      expect(mockWriteFileSync).not.toHaveBeenCalled()
-    })
-
-    it("does not persist when config has no linearWorkspaces key", async () => {
-      const { LinearAgentApi } = await import("../api/linear-api.js")
-
-      mockReadFileSync.mockReturnValue(JSON.stringify({ someOtherKey: "value" }))
-
-      const api = new LinearAgentApi("old-token", {
-        refreshToken: "old-refresh",
-        clientId: "cid",
-        clientSecret: "csec",
-        expiresAt: Date.now() - 1000,
-        source: "cyrus",
-      })
-
-      // Refresh call
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: () =>
-          Promise.resolve({
-            access_token: "new-token",
-            refresh_token: "new-refresh",
-            expires_in: 3600,
-          }),
-      })
-      // API call
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: () => Promise.resolve({ data: { teams: { nodes: [] } } }),
-      })
-
-      await api.getTeams()
-      expect(mockWriteFileSync).not.toHaveBeenCalled()
-    })
-
-    it("preserves other workspace fields when persisting token", async () => {
-      const { LinearAgentApi } = await import("../api/linear-api.js")
-
-      mockReadFileSync.mockReturnValue(
-        JSON.stringify({
-          linearWorkspaces: {
-            myWorkspace: {
-              linearToken: "old-token",
-              linearRefreshToken: "old-refresh",
-              linearTokenExpiresAt: 1000,
-              someOtherField: "preserve-me",
-            },
-          },
-          otherTopLevel: "keep-this",
-        }),
-      )
-
-      const api = new LinearAgentApi("old-token", {
-        refreshToken: "old-refresh",
-        clientId: "cid",
-        clientSecret: "csec",
-        expiresAt: Date.now() - 1000,
-        source: "cyrus",
-      })
-
-      // Refresh call
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: () =>
-          Promise.resolve({
-            access_token: "new-token",
-            refresh_token: "new-refresh",
-            expires_in: 3600,
-          }),
-      })
-      // API call
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: () => Promise.resolve({ data: { teams: { nodes: [] } } }),
-      })
-
-      await api.getTeams()
-
-      const written = JSON.parse(mockWriteFileSync.mock.calls[0][1])
-      // Other fields preserved
-      expect(written.linearWorkspaces.myWorkspace.someOtherField).toBe("preserve-me")
-      expect(written.otherTopLevel).toBe("keep-this")
-    })
-
-    it("skips refreshToken persistence when refreshToken is undefined", async () => {
-      const { LinearAgentApi } = await import("../api/linear-api.js")
-
-      mockReadFileSync.mockReturnValue(
-        JSON.stringify({
-          linearWorkspaces: {
-            myWorkspace: {
-              linearToken: "old-token",
-              linearRefreshToken: "old-refresh",
-              linearTokenExpiresAt: 1000,
-            },
-          },
-        }),
-      )
-
-      // No refreshToken provided — ensureValidToken will skip refresh
-      // (requires refreshToken && clientId && clientSecret)
-      const api = new LinearAgentApi("old-token", {
-        clientId: "cid",
-        clientSecret: "csec",
-        expiresAt: Date.now() - 1000,
-        source: "cyrus",
-      })
-
-      // No refresh happens (no refreshToken) — only API call
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: () => Promise.resolve({ data: { teams: { nodes: [] } } }),
-      })
-
-      await api.getTeams()
-
-      // No persistence since no refresh happened (refreshToken is undefined)
+      // No fs writes when no refresh occurs
       expect(mockWriteFileSync).not.toHaveBeenCalled()
     })
   })
 
   describe("resolveLinearToken", () => {
-    afterEach(() => {
-      delete process.env.LINEAR_ACCESS_TOKEN
-      delete process.env.LINEAR_API_KEY
-    })
-
     it("returns token from plugin config", async () => {
       const { resolveLinearToken } = await import("../api/linear-api.js")
       const result = resolveLinearToken({ accessToken: "cfg-token-123" })
       expect(result).toEqual({ accessToken: "cfg-token-123", source: "config" })
     })
 
-    it("returns token from env var as fallback", async () => {
-      const { resolveLinearToken } = await import("../api/linear-api.js")
-      mockReadFileSync.mockImplementation(() => {
-        throw new Error("no file")
-      })
-      process.env.LINEAR_ACCESS_TOKEN = "env-token"
-
-      const result = resolveLinearToken()
-      expect(result).toEqual({ accessToken: "env-token", source: "env" })
-    })
-
     it("returns none when no token available", async () => {
       const { resolveLinearToken } = await import("../api/linear-api.js")
-      mockReadFileSync.mockImplementation(() => {
-        throw new Error("no file")
-      })
-
       const result = resolveLinearToken()
       expect(result).toEqual({ accessToken: null, source: "none" })
     })
 
-    it("falls through to env when Cyrus config has no linearWorkspaces", async () => {
+    it("returns none when plugin config has empty string token", async () => {
       const { resolveLinearToken } = await import("../api/linear-api.js")
-      mockReadFileSync.mockReturnValue(JSON.stringify({ someKey: "value" }))
-      process.env.LINEAR_API_KEY = "api-key-from-env"
-
-      const result = resolveLinearToken()
-      expect(result).toEqual({ accessToken: "api-key-from-env", source: "env" })
-    })
-
-    it("falls through to env when first workspace has no linearToken", async () => {
-      const { resolveLinearToken } = await import("../api/linear-api.js")
-      mockReadFileSync.mockReturnValue(
-        JSON.stringify({
-          linearWorkspaces: {
-            ws1: { someField: "no token here" },
-          },
-        }),
-      )
-      process.env.LINEAR_ACCESS_TOKEN = "env-fallback"
-
-      const result = resolveLinearToken()
-      expect(result).toEqual({ accessToken: "env-fallback", source: "env" })
-    })
-
-    it("prefers LINEAR_ACCESS_TOKEN over LINEAR_API_KEY", async () => {
-      const { resolveLinearToken } = await import("../api/linear-api.js")
-      mockReadFileSync.mockImplementation(() => {
-        throw new Error("no file")
-      })
-      process.env.LINEAR_ACCESS_TOKEN = "access-token"
-      process.env.LINEAR_API_KEY = "api-key"
-
-      const result = resolveLinearToken()
-      expect(result).toEqual({ accessToken: "access-token", source: "env" })
-    })
-
-    it("falls through when plugin config has empty string token", async () => {
-      const { resolveLinearToken } = await import("../api/linear-api.js")
-      mockReadFileSync.mockReturnValue(
-        JSON.stringify({
-          linearWorkspaces: {
-            default: { linearToken: "cyrus-token" },
-          },
-        }),
-      )
-
-      // Empty string should not be accepted
       const result = resolveLinearToken({ accessToken: "" })
-      expect(result.source).toBe("cyrus")
-    })
-
-    it("falls through when plugin config has non-string token", async () => {
-      const { resolveLinearToken } = await import("../api/linear-api.js")
-      mockReadFileSync.mockImplementation(() => {
-        throw new Error("no file")
-      })
-      process.env.LINEAR_ACCESS_TOKEN = "env-token"
-
-      const result = resolveLinearToken({ accessToken: 12345 as any })
-      expect(result).toEqual({ accessToken: "env-token", source: "env" })
-    })
-
-    it("gracefully handles malformed Cyrus config JSON", async () => {
-      const { resolveLinearToken } = await import("../api/linear-api.js")
-      mockReadFileSync.mockReturnValue("not json{{{")
-
-      const result = resolveLinearToken()
       expect(result).toEqual({ accessToken: null, source: "none" })
     })
 
-    it("gracefully handles Cyrus config read error", async () => {
+    it("returns none when plugin config has non-string token", async () => {
       const { resolveLinearToken } = await import("../api/linear-api.js")
-      mockReadFileSync.mockImplementation(() => {
-        throw new Error("ENOENT: no such file")
-      })
-
-      const result = resolveLinearToken()
+      const result = resolveLinearToken({ accessToken: 12345 as any })
       expect(result).toEqual({ accessToken: null, source: "none" })
     })
   })

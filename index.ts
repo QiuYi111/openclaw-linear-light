@@ -12,18 +12,14 @@
  * - Additional tools for Linear operations (update status, search, etc.)
  */
 
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk"
-import { getChatChannelMeta, type ChannelPlugin } from "openclaw/plugin-sdk"
+import type { ChannelPlugin, OpenClawPluginApi } from "openclaw/plugin-sdk"
+// getChatChannelMeta is exported from plugin-sdk/core
+import { getChatChannelMeta } from "openclaw/plugin-sdk/core"
+import { onAfterToolCall, onAgentEnd, onBeforeToolCall, onLlmOutput } from "./src/activity-stream.js"
 import { LinearAgentApi, resolveLinearToken } from "./src/api/linear-api.js"
 import { handleOAuthCallback, handleOAuthInit } from "./src/oauth-handler.js"
+import { setLinearApi, setLinearRuntime } from "./src/runtime.js"
 import { handleWebhook } from "./src/webhook-handler.js"
-import { setLinearRuntime, setLinearApi, getLinearApi } from "./src/runtime.js"
-import {
-  onLlmOutput,
-  onBeforeToolCall,
-  onAfterToolCall,
-  onAgentEnd,
-} from "./src/activity-stream.js"
 
 // ---------------------------------------------------------------------------
 // Maps issueId → Linear agent session ID (for emitActivity)
@@ -92,13 +88,11 @@ export default function register(api: OpenClawPluginApi) {
   }
 
   // Register lifecycle hooks for real-time activity streaming
-  // @ts-expect-error — hook signatures vary across openclaw versions
   api.on("llm_output", onLlmOutput)
-  // @ts-expect-error — hook signatures vary across openclaw versions
+  // @ts-expect-error — hook param shape varies across openclaw versions
   api.on("before_tool_call", onBeforeToolCall)
-  // @ts-expect-error — hook signatures vary across openclaw versions
+  // @ts-expect-error — hook param shape varies across openclaw versions
   api.on("after_tool_call", onAfterToolCall)
-  // @ts-expect-error — hook signatures vary across openclaw versions
   api.on("agent_end", onAgentEnd)
 
   api.logger.info("Linear Light: ready (channel mode)")
@@ -108,6 +102,7 @@ export default function register(api: OpenClawPluginApi) {
 // Channel Plugin definition
 // ---------------------------------------------------------------------------
 
+// @ts-expect-error — "linear" is a custom channel, not in built-in ChatChannelId list
 const meta = getChatChannelMeta("linear")
 
 const linearPlugin: ChannelPlugin = {
@@ -123,7 +118,7 @@ const linearPlugin: ChannelPlugin = {
   },
   config: {
     listAccountIds: () => ["default"],
-    resolveAccount: () => ({ accountId: "default", configured: true } as any),
+    resolveAccount: () => ({ accountId: "default", configured: true }) as any,
     defaultAccountId: () => "default",
   },
   outbound: {
@@ -134,7 +129,7 @@ const linearPlugin: ChannelPlugin = {
       const pluginConfig = (cfg.plugins?.entries?.["linear-light"] as any)?.config
       const tokenInfo = resolveLinearToken(pluginConfig)
       if (!tokenInfo.accessToken) {
-        return { channel: "linear", ok: false, error: "no access token" }
+        return { channel: "linear", messageId: "", ok: false, error: "no access token" } as any
       }
 
       const linearApi = new LinearAgentApi(tokenInfo.accessToken, {
@@ -154,10 +149,10 @@ const linearPlugin: ChannelPlugin = {
         // For now, use the identifier to find the issue
         const issueId = await resolveIssueId(linearApi, to)
         if (!issueId) {
-          return { channel: "linear", ok: false, error: `could not resolve issue: ${to}` }
+          return { channel: "linear", messageId: "", ok: false, error: `could not resolve issue: ${to}` } as any
         }
 
-        await linearApi.createComment(issueId, text)
+        const commentId = await linearApi.createComment(issueId, text)
 
         // Emit response activity for Linear's agent session UI
         const agentSessionId = agentSessionMap.get(issueId)
@@ -169,13 +164,14 @@ const linearPlugin: ChannelPlugin = {
           }
         }
 
-        return { channel: "linear", ok: true }
+        return { channel: "linear", messageId: commentId || "", ok: true } as any
       } catch (err) {
         return {
           channel: "linear",
+          messageId: "",
           ok: false,
           error: err instanceof Error ? err.message : String(err),
-        }
+        } as any
       }
     },
   },
@@ -286,8 +282,10 @@ function createLinearTools(api: OpenClawPluginApi): any[] {
       execute: async (_tc: string, { query, limit = 10 }: { query: string; limit?: number }) => {
         try {
           // @ts-expect-error — gql is untyped in CI's openclaw version
-    const data = await (linearApi as any).gql<{
-            issueSearch: { nodes: Array<{ id: string; identifier: string; title: string; state: { name: string }; url: string }> }
+          const data = await (linearApi as any).gql<{
+            issueSearch: {
+              nodes: Array<{ id: string; identifier: string; title: string; state: { name: string }; url: string }>
+            }
           }>(
             `query SearchIssues($query: String!, $limit: Int) {
               issueSearch(query: $query, first: $limit) {
@@ -296,7 +294,9 @@ function createLinearTools(api: OpenClawPluginApi): any[] {
             }`,
             { query, limit },
           )
-          const results = data.issueSearch.nodes.map((i: any) => `[${i.identifier}] ${i.title} (${i.state.name}) ${i.url}`)
+          const results = data.issueSearch.nodes.map(
+            (i: any) => `[${i.identifier}] ${i.title} (${i.state.name}) ${i.url}`,
+          )
           return {
             content: [{ type: "text", text: results.length ? results.join("\n") : "No issues found" }],
             details: {},
