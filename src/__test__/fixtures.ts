@@ -95,5 +95,5 @@ export function makeTeamStates() {
 import { createHmac } from "node:crypto"
 
 export function signPayload(body: string, secret: string): string {
-  return createHmac("sha256", secret).update(body).digest("base64")
+  return createHmac("sha256", secret).update(body).digest("hex")
 }

@@ -14,8 +14,8 @@
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type HookContext = any
 
-import { getLinearApi } from "./runtime.js"
 import { agentSessionMap } from "../index.js"
+import { getLinearApi } from "./runtime.js"
 
 // ---------------------------------------------------------------------------
 // Debounce state per session
@@ -141,10 +141,7 @@ export async function onLlmOutput(
   const now = Date.now()
 
   // Emit thought if enough time has passed and buffer has meaningful content
-  if (
-    now - state.lastEmitTime > DEBOUNCE_MS &&
-    latestText.length > 20
-  ) {
+  if (now - state.lastEmitTime > DEBOUNCE_MS && latestText.length > 20) {
     state.thoughtCount++
     state.lastEmitTime = now
     await emitThought(agentSessionId, latestText)
@@ -155,10 +152,7 @@ export async function onLlmOutput(
  * Called before a tool is invoked.
  * Emits an "action starting" activity.
  */
-export function onBeforeToolCall(
-  event: { toolName: string; input: unknown },
-  ctx: HookContext,
-): void {
+export function onBeforeToolCall(event: { toolName: string; input: unknown }, ctx: HookContext): void {
   const sessionKey = ctx.sessionKey
   if (!sessionKey?.startsWith("linear:")) return
 
@@ -177,10 +171,7 @@ export function onBeforeToolCall(
  * Called after a tool returns.
  * Emits an "action complete" activity.
  */
-export function onAfterToolCall(
-  event: { toolName: string; output: unknown },
-  ctx: HookContext,
-): void {
+export function onAfterToolCall(event: { toolName: string; output: unknown }, ctx: HookContext): void {
   const sessionKey = ctx.sessionKey
   if (!sessionKey?.startsWith("linear:")) return
 

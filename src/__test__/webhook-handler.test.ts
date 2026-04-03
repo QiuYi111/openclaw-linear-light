@@ -1,11 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { makeAgentSessionCreated, makeAgentSessionPrompted, signPayload } from "./fixtures"
 
-// Cache the real Date.now so we can restore after fake timer tests
-const realDateNow = Date.now
-
 // ---------------------------------------------------------------------------
-// Webhook handler unit tests
+// Webhook handler unit tests — channel-mode architecture
 // ---------------------------------------------------------------------------
 
 const mockLogger = {
@@ -15,7 +12,7 @@ const mockLogger = {
   debug: vi.fn(),
 }
 
-const mockSubagentRun = vi.fn().mockResolvedValue(undefined)
+const mockDispatchInboundReplyWithBase = vi.fn().mockResolvedValue(undefined)
 
 vi.mock("node:fs", () => ({
   readFileSync: vi.fn(() => {
@@ -24,7 +21,53 @@ vi.mock("node:fs", () => ({
   writeFileSync: vi.fn(),
 }))
 
-vi.mock("openclaw/plugin-sdk", () => ({}))
+vi.mock("openclaw/plugin-sdk", () => ({
+  dispatchInboundReplyWithBase: (...args: any[]) => mockDispatchInboundReplyWithBase(...args),
+  createPluginRuntimeStore: vi.fn(() => ({
+    setRuntime: vi.fn(),
+    getRuntime: vi.fn(() => null),
+  })),
+}))
+
+// Mock openclaw/plugin-sdk/core for getChatChannelMeta (imported by index.ts)
+vi.mock("openclaw/plugin-sdk/core", () => ({
+  getChatChannelMeta: vi.fn(() => ({
+    id: "linear",
+    label: "Linear",
+    icon: "linear",
+    description: "Linear project management",
+    category: "developer-tools",
+    features: [],
+    configSchema: [],
+  })),
+}))
+
+// Mock runtime store
+vi.mock("../runtime.js", () => ({
+  getLinearRuntime: vi.fn(() => mockRuntime),
+  setLinearApi: vi.fn(),
+}))
+
+const mockRuntime = {
+  channel: {
+    routing: {
+      resolveAgentRoute: vi.fn(() => ({
+        agentId: "agent-main",
+        sessionKey: "agent:main:linear:direct:ENG-42",
+        accountId: "default",
+        model: "default",
+      })),
+    },
+    session: {
+      resolveStorePath: vi.fn(() => "/tmp/store/agent-main"),
+      recordInboundSession: vi.fn(),
+    },
+    reply: {
+      finalizeInboundContext: vi.fn((ctx: any) => ctx),
+      dispatchReplyWithBufferedBlockDispatcher: vi.fn(),
+    },
+  },
+}
 
 const mockFetch = vi.fn()
 vi.stubGlobal("fetch", mockFetch)
@@ -32,9 +75,7 @@ vi.stubGlobal("fetch", mockFetch)
 describe("handleWebhook", () => {
   const SECRET = "wh-secret-test-123"
 
-  // Module-level state (recentlyProcessed, activeRuns) persists across tests
-  // because the module is cached after the first dynamic import.
-  // We use unique IDs to avoid collisions.
+  // Module-level dedup state persists across tests — use unique IDs
   let uid = 1
 
   function makeApi(config: Record<string, unknown> = {}) {
@@ -44,16 +85,12 @@ describe("handleWebhook", () => {
         webhookSecret: SECRET,
         mentionTrigger: "Linus",
         autoInProgress: true,
-        notifyOnComplete: true,
-        notificationChannel: "telegram",
-        notificationTarget: "12345",
-        sessionPrefix: "linear:",
+        accessToken: "lin_test_token",
         ...config,
       },
       logger: mockLogger,
-      runtime: {
-        subagent: { run: mockSubagentRun },
-      },
+      config: {},
+      runtime: mockRuntime,
     } as any
   }
 
@@ -82,7 +119,7 @@ describe("handleWebhook", () => {
     return { req, res }
   }
 
-  /** Unique "created" payload — avoids dedup and activeRuns collisions */
+  /** Unique "created" payload — avoids dedup collisions */
   function uniqueCreated(overrides?: Record<string, unknown>) {
     const n = uid++
     return makeAgentSessionCreated({
@@ -125,8 +162,16 @@ describe("handleWebhook", () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
-    mockSubagentRun.mockResolvedValue(undefined)
+    mockDispatchInboundReplyWithBase.mockResolvedValue(undefined)
     mockFetch.mockReset()
+    mockRuntime.channel.routing.resolveAgentRoute.mockReturnValue({
+      agentId: "agent-main",
+      sessionKey: "agent:main:linear:direct:ENG-42",
+      accountId: "default",
+      model: "default",
+    })
+    mockRuntime.channel.session.resolveStorePath.mockReturnValue("/tmp/store/agent-main")
+    mockRuntime.channel.reply.finalizeInboundContext.mockImplementation((ctx: any) => ctx)
   })
 
   afterEach(() => {
@@ -141,9 +186,7 @@ describe("handleWebhook", () => {
     it("returns 500 when no webhook secret configured", async () => {
       const { handleWebhook } = await import("../webhook-handler.js")
       const noSecretApi = makeApi()
-      // Remove webhookSecret from config and clear env
       noSecretApi.pluginConfig.webhookSecret = undefined
-      delete process.env.LINEAR_WEBHOOK_SECRET
 
       const payload = uniqueCreated()
       const { req } = makeSignedReq(payload, SECRET)
@@ -151,7 +194,7 @@ describe("handleWebhook", () => {
 
       await handleWebhook(noSecretApi, req, res)
       expect(res.writeHead).toHaveBeenCalledWith(500, expect.any(Object))
-      expect(res.end).toHaveBeenCalledWith(expect.stringContaining("no webhook secret configured"))
+      expect(res.end).toHaveBeenCalledWith(expect.stringContaining("no webhook secret"))
     })
 
     it("rejects requests without signature header", async () => {
@@ -196,26 +239,66 @@ describe("handleWebhook", () => {
       expect(res.writeHead).toHaveBeenCalledWith(401, expect.any(Object))
     })
 
-    it("returns 400 with default message when readBody fails without error string", async () => {
+    it("returns 400 when readBody fails", async () => {
       const { handleWebhook } = await import("../webhook-handler.js")
       const api = makeApi()
       const sig = "valid-sig"
 
-      // Request that triggers "timeout" (which has no rawBuffer, and error = "timeout")
-      // We need ok=false with an error to hit the `error || "bad request"` fallback
+      // Request that triggers invalid JSON (no data sent)
       const req = {
         headers: { "linear-signature": sig },
         on: vi.fn((event: string, cb: (...args: any[]) => void) => {
           if (event === "end") cb()
-          // Don't send any data — body will be empty → invalid JSON
         }),
       }
 
       const res = { writeHead: vi.fn(), end: vi.fn() } as any
 
       await handleWebhook(api, req, res)
-      // readBody returns ok=false for invalid JSON → 400 with "bad request" (no error string)
       expect(res.writeHead).toHaveBeenCalledWith(400, expect.any(Object))
+    })
+
+    it("rejects requests with body too large", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi()
+      const sig = "valid-sig"
+
+      const req = {
+        headers: { "linear-signature": sig },
+        on: vi.fn((event: string, cb: (...args: any[]) => void) => {
+          if (event === "data") {
+            // Send a chunk larger than maxBytes (1MB default)
+            cb(Buffer.from("x".repeat(2_000_000)))
+          }
+        }),
+      }
+
+      const res = { writeHead: vi.fn(), end: vi.fn() } as any
+
+      await handleWebhook(api, req, res)
+      expect(res.writeHead).toHaveBeenCalledWith(400, expect.any(Object))
+    })
+
+    it("rejects requests that timeout during body read", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi()
+      const sig = "valid-sig"
+
+      // Request that never emits "end" — should timeout after 5s
+      const req = {
+        headers: { "linear-signature": sig },
+        on: vi.fn(),
+      }
+
+      const res = { writeHead: vi.fn(), end: vi.fn() } as any
+
+      vi.useFakeTimers()
+      const promise = handleWebhook(api, req, res)
+      vi.advanceTimersByTime(6000)
+      await promise
+
+      expect(res.writeHead).toHaveBeenCalledWith(400, expect.any(Object))
+      vi.useRealTimers()
     })
 
     it("accepts requests with valid signature", async () => {
@@ -271,7 +354,7 @@ describe("handleWebhook", () => {
   describe("AgentSessionEvent created", () => {
     // -----------------------------------------------------------------------
 
-    it("dispatches agent with correct session key", async () => {
+    it("dispatches agent via dispatchInboundReplyWithBase", async () => {
       const { handleWebhook } = await import("../webhook-handler.js")
       const api = makeApi()
       const payload = uniqueCreated()
@@ -280,36 +363,33 @@ describe("handleWebhook", () => {
       await handleWebhook(api, req, res)
 
       expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
-      expect(mockSubagentRun).toHaveBeenCalledWith(
+      expect(mockDispatchInboundReplyWithBase).toHaveBeenCalledWith(
         expect.objectContaining({
-          sessionKey: `linear:issue-uid-${uid - 1}`,
+          channel: "linear",
+          accountId: "default",
         }),
       )
     })
 
-    it("uses sessionPrefix from config", async () => {
+    it("stores agentSessionMap entry for emitActivity", async () => {
       const { handleWebhook } = await import("../webhook-handler.js")
-      const api = makeApi({ sessionPrefix: "custom:" })
+      const { agentSessionMap } = await import("../../index.js")
+
+      const api = makeApi()
       const payload = uniqueCreated()
       const { req, res } = makeSignedReq(payload, SECRET)
 
       await handleWebhook(api, req, res)
 
-      expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
-      expect(mockSubagentRun).toHaveBeenCalledWith(
-        expect.objectContaining({
-          sessionKey: `custom:issue-uid-${uid - 1}`,
-        }),
-      )
+      expect(agentSessionMap.has(payload.agentSession.issue.id)).toBe(true)
+      agentSessionMap.delete(payload.agentSession.issue.id)
     })
 
     it("updates issue to In Progress when autoInProgress and accessToken available", async () => {
       const { handleWebhook } = await import("../webhook-handler.js")
       const api = makeApi({ accessToken: "lin_test_token" })
 
-      // Mock fetch for updateIssueState flow:
-      // 1) getIssueDetails  2) getTeamStates  3) issueUpdate mutation
-      // 4) emitActivity (initial thought)
+      // Mock fetch for updateIssueState flow (3 calls) + emitActivity (1 call)
       mockFetch
         .mockResolvedValueOnce({
           ok: true,
@@ -356,7 +436,7 @@ describe("handleWebhook", () => {
       await handleWebhook(api, req, res)
 
       expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
-      // 3 fetch calls for the status update flow + 1 for emitActivity
+      // 3 fetch calls for status update + 1 for emitActivity
       expect(mockFetch).toHaveBeenCalledTimes(4)
       const updateCall = mockFetch.mock.calls[2]
       const body = JSON.parse(updateCall[1].body)
@@ -374,42 +454,10 @@ describe("handleWebhook", () => {
       await handleWebhook(api, req, res)
 
       expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
-      expect(mockSubagentRun).not.toHaveBeenCalled()
+      expect(mockDispatchInboundReplyWithBase).not.toHaveBeenCalled()
     })
 
-    it("skips when agent already running (activeRuns guard)", async () => {
-      const { handleWebhook } = await import("../webhook-handler.js")
-      const api = makeApi()
-
-      // First dispatch — agent starts
-      const payload1 = uniqueCreated()
-      const { req: req1, res: res1 } = makeSignedReq(payload1, SECRET)
-      await handleWebhook(api, req1, res1)
-
-      // Second dispatch with DIFFERENT agentSession.id (bypasses dedup)
-      // but SAME issue (hits activeRuns guard)
-      const n = uid++
-      const payload2 = makeAgentSessionCreated({
-        createdAt: `2099-06-01T00:00:${String(n).padStart(2, "0")}.000Z`,
-        agentSession: {
-          ...makeAgentSessionCreated().agentSession,
-          id: `sess-alt-${n}`,
-          issue: payload1.agentSession.issue, // same issue, different session
-        },
-      })
-      const { req: req2, res: res2 } = makeSignedReq(payload2, SECRET)
-      await handleWebhook(api, req2, res2)
-
-      // First call dispatches, second blocked by activeRuns
-      expect(mockSubagentRun).toHaveBeenCalledTimes(1)
-    })
-  })
-
-  // -----------------------------------------------------------------------
-  describe("malformed payload type guards", () => {
-    // -----------------------------------------------------------------------
-
-    it("handleSessionCreated skips when issue.id is missing", async () => {
+    it("skips session without issue.id", async () => {
       const { handleWebhook } = await import("../webhook-handler.js")
       const api = makeApi()
       const n = uid++
@@ -432,11 +480,10 @@ describe("handleWebhook", () => {
       await handleWebhook(api, req, res)
 
       expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
-      expect(mockSubagentRun).not.toHaveBeenCalled()
-      expect(mockLogger.warn).toHaveBeenCalledWith(expect.stringContaining("malformed session payload"))
+      expect(mockDispatchInboundReplyWithBase).not.toHaveBeenCalled()
     })
 
-    it("handleSessionCreated skips when issue.title is missing", async () => {
+    it("skips session without issue.title", async () => {
       const { handleWebhook } = await import("../webhook-handler.js")
       const api = makeApi()
       const n = uid++
@@ -459,11 +506,10 @@ describe("handleWebhook", () => {
       await handleWebhook(api, req, res)
 
       expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
-      expect(mockSubagentRun).not.toHaveBeenCalled()
-      expect(mockLogger.warn).toHaveBeenCalledWith(expect.stringContaining("malformed session payload"))
+      expect(mockDispatchInboundReplyWithBase).not.toHaveBeenCalled()
     })
 
-    it("handleSessionCreated skips when issue.identifier is missing", async () => {
+    it("skips session without issue.identifier", async () => {
       const { handleWebhook } = await import("../webhook-handler.js")
       const api = makeApi()
       const n = uid++
@@ -486,11 +532,324 @@ describe("handleWebhook", () => {
       await handleWebhook(api, req, res)
 
       expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
-      expect(mockSubagentRun).not.toHaveBeenCalled()
-      expect(mockLogger.warn).toHaveBeenCalledWith(expect.stringContaining("malformed session payload"))
+      expect(mockDispatchInboundReplyWithBase).not.toHaveBeenCalled()
     })
 
-    it("handleSessionPrompted skips when issue.id is missing", async () => {
+    it("handles autoInProgress fetch failure gracefully", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi({ accessToken: "lin_test_token" })
+
+      // First call fails (getIssueDetails for updateIssueState)
+      mockFetch.mockRejectedValueOnce(new Error("fetch failed"))
+
+      const payload = uniqueCreated()
+      const { req, res } = makeSignedReq(payload, SECRET)
+
+      await handleWebhook(api, req, res)
+
+      // Should still succeed (status update is best-effort)
+      expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
+      expect(mockDispatchInboundReplyWithBase).toHaveBeenCalled()
+    })
+
+    it("uses issue description as prompt when comment body is agent session marker", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi()
+      const n = uid++
+      const payload = makeAgentSessionCreated({
+        createdAt: `2026-04-01T12:00:${String(n).padStart(2, "0")}.000Z`,
+        agentSession: {
+          id: `sess-desc-${n}`,
+          issue: {
+            id: `issue-desc-${n}`,
+            identifier: `ENG-${n + 100}`,
+            title: `Desc issue ${n}`,
+            description: "Description for issue",
+            url: `https://linear.app/eng/issue/ENG-${n + 100}`,
+            team: { id: "team-001", key: "ENG", name: "Engineering" },
+          },
+          comment: { body: "This thread is for an agent session with linus." },
+        },
+      })
+      const { req, res } = makeSignedReq(payload, SECRET)
+
+      await handleWebhook(api, req, res)
+
+      expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
+      expect(mockDispatchInboundReplyWithBase).toHaveBeenCalled()
+      // The ctxPayload.Body should contain the issue description
+      const dispatchCall = mockDispatchInboundReplyWithBase.mock.calls[0][0]
+      expect(dispatchCall.ctxPayload.Body).toContain("Description for issue")
+    })
+
+    it("uses comment body as prompt when user mentions agent", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi()
+      const n = uid++
+      const payload = makeAgentSessionCreated({
+        createdAt: `2026-04-01T12:00:${String(n).padStart(2, "0")}.000Z`,
+        agentSession: {
+          id: `sess-mention-${n}`,
+          issue: {
+            id: `issue-mention-${n}`,
+            identifier: `ENG-${n + 100}`,
+            title: `Mention issue ${n}`,
+            description: "Desc",
+            url: `https://linear.app/eng/issue/ENG-${n + 100}`,
+            team: { id: "team-001", key: "ENG", name: "Engineering" },
+          },
+          comment: { body: "@Linus please investigate this issue" },
+        },
+      })
+      const { req, res } = makeSignedReq(payload, SECRET)
+
+      await handleWebhook(api, req, res)
+
+      expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
+      const dispatchCall = mockDispatchInboundReplyWithBase.mock.calls[0][0]
+      expect(dispatchCall.ctxPayload.Body).toContain("@Linus please investigate this issue")
+    })
+  })
+
+  // -----------------------------------------------------------------------
+  describe("dispatchToAgent internals", () => {
+    // -----------------------------------------------------------------------
+
+    it("calls resolveAgentRoute with correct channel and peer", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi()
+      const payload = uniqueCreated()
+      const { req, res } = makeSignedReq(payload, SECRET)
+
+      await handleWebhook(api, req, res)
+
+      expect(mockRuntime.channel.routing.resolveAgentRoute).toHaveBeenCalledWith(
+        expect.objectContaining({
+          channel: "linear",
+          accountId: "default",
+          peer: expect.objectContaining({ kind: "direct", id: payload.agentSession.issue.identifier }),
+        }),
+      )
+    })
+
+    it("calls finalizeInboundContext with correct fields", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi()
+      const payload = uniqueCreated()
+      const { req, res } = makeSignedReq(payload, SECRET)
+
+      await handleWebhook(api, req, res)
+
+      expect(mockRuntime.channel.reply.finalizeInboundContext).toHaveBeenCalledWith(
+        expect.objectContaining({
+          From: `linear:issue:${payload.agentSession.issue.identifier}`,
+          To: `linear:${payload.agentSession.issue.identifier}`,
+          ChatType: "direct",
+          Provider: "linear",
+          Surface: "linear",
+          ConversationLabel: `Linear ${payload.agentSession.issue.identifier}`,
+        }),
+      )
+    })
+
+    it("passes deliver callback to dispatchInboundReplyWithBase", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi()
+      const payload = uniqueCreated()
+      const { req, res } = makeSignedReq(payload, SECRET)
+
+      await handleWebhook(api, req, res)
+
+      const dispatchCall = mockDispatchInboundReplyWithBase.mock.calls[0][0]
+      expect(typeof dispatchCall.deliver).toBe("function")
+    })
+
+    it("deliver callback creates comment via Linear API", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi({ accessToken: "lin_test_token" })
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ data: { commentCreate: { success: true, comment: { id: "c-deliver" } } } }),
+      })
+
+      const payload = uniqueCreated()
+      const { req, res } = makeSignedReq(payload, SECRET)
+
+      await handleWebhook(api, req, res)
+
+      // Get the deliver callback from the dispatch call
+      const dispatchCall = mockDispatchInboundReplyWithBase.mock.calls[0][0]
+      await dispatchCall.deliver({ text: "Agent reply text" })
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining("api.linear.app"),
+        expect.objectContaining({
+          method: "POST",
+        }),
+      )
+    })
+
+    it("deliver callback logs error when createComment fails", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi({ accessToken: "lin_test_token" })
+
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        text: () => Promise.resolve("Server Error"),
+      })
+
+      const payload = uniqueCreated()
+      const { req, res } = makeSignedReq(payload, SECRET)
+
+      await handleWebhook(api, req, res)
+
+      const dispatchCall = mockDispatchInboundReplyWithBase.mock.calls[0][0]
+      await dispatchCall.deliver({ text: "Agent reply" })
+
+      expect(mockLogger.error).toHaveBeenCalledWith(expect.stringContaining("deliver error"))
+    })
+
+    it("deliver callback skips when payload has no text", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi({ autoInProgress: false })
+      const payload = uniqueCreated()
+      const { req, res } = makeSignedReq(payload, SECRET)
+
+      await handleWebhook(api, req, res)
+
+      // Clear any fetch calls from dispatch
+      mockFetch.mockClear()
+
+      const dispatchCall = mockDispatchInboundReplyWithBase.mock.calls[0][0]
+      await dispatchCall.deliver({ text: undefined })
+
+      // No fetch call should be made for empty text
+      expect(mockFetch).not.toHaveBeenCalled()
+    })
+
+    it("deliver callback logs error when no access token available", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      // No accessToken — makeLinearApi returns null
+      const api = makeApi({ autoInProgress: false, accessToken: "" })
+      const payload = uniqueCreated()
+      const { req, res } = makeSignedReq(payload, SECRET)
+
+      await handleWebhook(api, req, res)
+
+      const dispatchCall = mockDispatchInboundReplyWithBase.mock.calls[0][0]
+      await dispatchCall.deliver({ text: "Reply text" })
+
+      expect(mockLogger.error).toHaveBeenCalledWith(expect.stringContaining("no access token"))
+    })
+
+    it("deliver callback logs success after creating comment", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi({ accessToken: "lin_test_token" })
+
+      // First fetch: getIssueDetails (called during handleWebhook)
+      // Second fetch: createComment (called during deliver)
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ data: { commentCreate: { success: true, comment: { id: "c-ok" } } } }),
+      })
+
+      const payload = uniqueCreated()
+      const { req, res } = makeSignedReq(payload, SECRET)
+
+      await handleWebhook(api, req, res)
+
+      const dispatchCall = mockDispatchInboundReplyWithBase.mock.calls[0][0]
+      await dispatchCall.deliver({ text: "Reply" })
+
+      // Check that delivered comment was logged (among other info calls)
+      const deliveredCalls = mockLogger.info.mock.calls.filter((call: any[]) =>
+        call[0]?.includes?.("delivered comment"),
+      )
+      expect(deliveredCalls).toHaveLength(1)
+    })
+
+    it("passes onRecordError and onDispatchError callbacks", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi({ autoInProgress: false })
+      const payload = uniqueCreated()
+      const { req, res } = makeSignedReq(payload, SECRET)
+
+      await handleWebhook(api, req, res)
+
+      const dispatchCall = mockDispatchInboundReplyWithBase.mock.calls[0][0]
+      expect(typeof dispatchCall.onRecordError).toBe("function")
+      expect(typeof dispatchCall.onDispatchError).toBe("function")
+
+      // Trigger onRecordError
+      dispatchCall.onRecordError(new Error("record failed"))
+      expect(mockLogger.error).toHaveBeenCalledWith(expect.stringContaining("record inbound error"))
+
+      mockLogger.error.mockClear()
+      // Trigger onDispatchError
+      dispatchCall.onDispatchError(new Error("dispatch failed"), { kind: "timeout" })
+      expect(mockLogger.error).toHaveBeenCalledWith(expect.stringContaining("dispatch error [timeout]"))
+    })
+
+    it("returns 500 when dispatchInboundReplyWithBase throws", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      mockDispatchInboundReplyWithBase.mockRejectedValueOnce(new Error("agent crashed"))
+      const api = makeApi()
+      const payload = uniqueCreated()
+      const { req, res } = makeSignedReq(payload, SECRET)
+
+      await handleWebhook(api, req, res)
+
+      expect(res.writeHead).toHaveBeenCalledWith(500, expect.any(Object))
+    })
+  })
+
+  // -----------------------------------------------------------------------
+  describe("AgentSessionEvent prompted", () => {
+    // -----------------------------------------------------------------------
+
+    it("dispatches follow-up for prompted events", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi()
+      const payload = uniquePrompted()
+      const { req, res } = makeSignedReq(payload, SECRET)
+
+      await handleWebhook(api, req, res)
+
+      expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
+      expect(mockDispatchInboundReplyWithBase).toHaveBeenCalled()
+    })
+
+    it("skips prompted events with stop signal", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi()
+      const payload = uniquePrompted({
+        agentActivity: { signal: "stop", content: { body: "stop" } },
+      })
+      const { req, res } = makeSignedReq(payload, SECRET)
+
+      await handleWebhook(api, req, res)
+
+      expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
+      expect(mockDispatchInboundReplyWithBase).not.toHaveBeenCalled()
+    })
+
+    it("skips prompted events without content body", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi()
+      const payload = uniquePrompted({
+        agentActivity: { content: { body: null }, signal: null },
+      })
+      const { req, res } = makeSignedReq(payload, SECRET)
+
+      await handleWebhook(api, req, res)
+
+      expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
+      expect(mockDispatchInboundReplyWithBase).not.toHaveBeenCalled()
+    })
+
+    it("skips prompted events without issue.id", async () => {
       const { handleWebhook } = await import("../webhook-handler.js")
       const api = makeApi()
       const n = uid++
@@ -514,11 +873,10 @@ describe("handleWebhook", () => {
       await handleWebhook(api, req, res)
 
       expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
-      expect(mockSubagentRun).not.toHaveBeenCalled()
-      expect(mockLogger.warn).toHaveBeenCalledWith(expect.stringContaining("malformed prompted payload"))
+      expect(mockDispatchInboundReplyWithBase).not.toHaveBeenCalled()
     })
 
-    it("handleSessionPrompted skips when issue.identifier is missing", async () => {
+    it("skips prompted events without issue.identifier", async () => {
       const { handleWebhook } = await import("../webhook-handler.js")
       const api = makeApi()
       const n = uid++
@@ -542,209 +900,10 @@ describe("handleWebhook", () => {
       await handleWebhook(api, req, res)
 
       expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
-      expect(mockSubagentRun).not.toHaveBeenCalled()
-      expect(mockLogger.warn).toHaveBeenCalledWith(expect.stringContaining("malformed prompted payload"))
-    })
-  })
-
-  // -----------------------------------------------------------------------
-  describe("webhook processing errors", () => {
-    // -----------------------------------------------------------------------
-
-    it("returns 500 when agent dispatch fails", async () => {
-      const { handleWebhook } = await import("../webhook-handler.js")
-      mockSubagentRun.mockRejectedValue(new Error("agent crashed"))
-      const api = makeApi()
-      const payload = uniqueCreated()
-      const { req, res } = makeSignedReq(payload, SECRET)
-
-      await handleWebhook(api, req, res)
-
-      expect(res.writeHead).toHaveBeenCalledWith(500, expect.any(Object))
+      expect(mockDispatchInboundReplyWithBase).not.toHaveBeenCalled()
     })
 
-    it("handles autoInProgress fetch failure gracefully", async () => {
-      const { handleWebhook } = await import("../webhook-handler.js")
-      const api = makeApi({ accessToken: "lin_test_token" })
-
-      // First call fails (getIssueDetails)
-      mockFetch.mockRejectedValueOnce(new Error("fetch failed"))
-
-      const payload = uniqueCreated()
-      const { req, res } = makeSignedReq(payload, SECRET)
-
-      await handleWebhook(api, req, res)
-
-      // Should still succeed (status update is best-effort)
-      expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
-      expect(mockSubagentRun).toHaveBeenCalled()
-    })
-  })
-
-  // -----------------------------------------------------------------------
-  describe("activeRuns cleanup on failure (handleSessionCreated)", () => {
-    // -----------------------------------------------------------------------
-
-    it("clears activeRuns after subagent.run() throws so a retry is allowed", async () => {
-      const { handleWebhook } = await import("../webhook-handler.js")
-      const api = makeApi()
-
-      // First dispatch fails
-      mockSubagentRun.mockRejectedValueOnce(new Error("agent crashed"))
-      const payload = uniqueCreated()
-      const { req: req1, res: res1 } = makeSignedReq(payload, SECRET)
-      await handleWebhook(api, req1, res1)
-      expect(res1.writeHead).toHaveBeenCalledWith(500, expect.any(Object))
-
-      // Retry for same issue (different session ID to bypass dedup) — should be allowed
-      mockSubagentRun.mockResolvedValueOnce(undefined)
-      const n = uid++
-      const retryPayload = makeAgentSessionCreated({
-        createdAt: `2099-09-01T00:00:${String(n).padStart(2, "0")}.000Z`,
-        agentSession: {
-          ...payload.agentSession,
-          id: `sess-retry-${n}`,
-          issue: payload.agentSession.issue,
-        },
-      })
-      const { req: req2, res: res2 } = makeSignedReq(retryPayload, SECRET)
-      await handleWebhook(api, req2, res2)
-
-      expect(res2.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
-      expect(mockSubagentRun).toHaveBeenCalledTimes(2)
-    })
-
-    it("clears agentSessionMap when subagent.run() throws", async () => {
-      const { handleWebhook, agentSessionMap } = await import("../webhook-handler.js")
-      const api = makeApi()
-
-      mockSubagentRun.mockRejectedValueOnce(new Error("agent crashed"))
-      const payload = uniqueCreated()
-      const { req, res } = makeSignedReq(payload, SECRET)
-      await handleWebhook(api, req, res)
-
-      expect(res.writeHead).toHaveBeenCalledWith(500, expect.any(Object))
-      expect(agentSessionMap.has(payload.agentSession.issue.id)).toBe(false)
-    })
-
-    it("rolls back issue state to Todo when subagent.run() throws after In Progress", async () => {
-      const { handleWebhook } = await import("../webhook-handler.js")
-      const api = makeApi({ accessToken: "lin_test_token" })
-
-      mockSubagentRun.mockRejectedValueOnce(new Error("agent crashed"))
-
-      const payload = uniqueCreated()
-      const issueId = payload.agentSession.issue.id
-
-      const issueResponse = {
-        ok: true,
-        json: () =>
-          Promise.resolve({
-            data: {
-              issue: { id: issueId, identifier: "ENG-X", team: { id: "team-001", key: "ENG", name: "Eng" } },
-            },
-          }),
-      }
-      const statesResponse = {
-        ok: true,
-        json: () =>
-          Promise.resolve({
-            data: {
-              team: {
-                states: {
-                  nodes: [
-                    { id: "s-todo", name: "Todo" },
-                    { id: "s-ip", name: "In Progress" },
-                  ],
-                },
-              },
-            },
-          }),
-      }
-      const updateResponse = {
-        ok: true,
-        json: () => Promise.resolve({ data: { issueUpdate: { success: true } } }),
-      }
-
-      mockFetch
-        .mockResolvedValueOnce(issueResponse) // getIssueDetails → In Progress
-        .mockResolvedValueOnce(statesResponse) // getTeamStates
-        .mockResolvedValueOnce(updateResponse) // issueUpdate → In Progress
-        .mockResolvedValueOnce(issueResponse) // getIssueDetails → Todo rollback
-        .mockResolvedValueOnce(statesResponse) // getTeamStates
-        .mockResolvedValueOnce(updateResponse) // issueUpdate → Todo
-
-      const { req, res } = makeSignedReq(payload, SECRET)
-      await handleWebhook(api, req, res)
-
-      expect(res.writeHead).toHaveBeenCalledWith(500, expect.any(Object))
-      expect(mockFetch).toHaveBeenCalledTimes(6)
-      // Rollback call (6th fetch) should target "Todo" state
-      const rollbackBody = JSON.parse(mockFetch.mock.calls[5][1].body)
-      expect(rollbackBody.variables.input.stateId).toBe("s-todo")
-    })
-
-    it("logs warning when rollback fails after subagent.run() throws (handleSessionCreated)", async () => {
-      const { handleWebhook } = await import("../webhook-handler.js")
-      const api = makeApi({ accessToken: "lin_test_token" })
-
-      mockSubagentRun.mockRejectedValueOnce(new Error("agent crashed"))
-
-      const payload = uniqueCreated()
-      const issueId = payload.agentSession.issue.id
-
-      const issueResponse = {
-        ok: true,
-        json: () =>
-          Promise.resolve({
-            data: {
-              issue: { id: issueId, identifier: "ENG-X", team: { id: "team-001", key: "ENG", name: "Eng" } },
-            },
-          }),
-      }
-      const statesResponse = {
-        ok: true,
-        json: () =>
-          Promise.resolve({
-            data: {
-              team: {
-                states: {
-                  nodes: [
-                    { id: "s-todo", name: "Todo" },
-                    { id: "s-ip", name: "In Progress" },
-                  ],
-                },
-              },
-            },
-          }),
-      }
-      const updateResponse = {
-        ok: true,
-        json: () => Promise.resolve({ data: { issueUpdate: { success: true } } }),
-      }
-
-      mockFetch
-        .mockResolvedValueOnce(issueResponse) // getIssueDetails → In Progress
-        .mockResolvedValueOnce(statesResponse) // getTeamStates
-        .mockResolvedValueOnce(updateResponse) // issueUpdate → In Progress
-        .mockResolvedValueOnce(issueResponse) // getIssueDetails → Todo rollback
-        .mockResolvedValueOnce(statesResponse) // getTeamStates
-        .mockRejectedValueOnce(new Error("rollback failed")) // issueUpdate → Todo FAILS
-
-      const { req, res } = makeSignedReq(payload, SECRET)
-      await handleWebhook(api, req, res)
-
-      expect(res.writeHead).toHaveBeenCalledWith(500, expect.any(Object))
-      // Should have logged the rollback failure
-      expect(mockLogger.warn).toHaveBeenCalledWith(expect.stringContaining("failed to rollback status"))
-    })
-  })
-
-  // -----------------------------------------------------------------------
-  describe("AgentSessionEvent prompted", () => {
-    // -----------------------------------------------------------------------
-
-    it("dispatches follow-up for prompted events", async () => {
+    it("includes follow-up body in dispatch context", async () => {
       const { handleWebhook } = await import("../webhook-handler.js")
       const api = makeApi()
       const payload = uniquePrompted()
@@ -752,130 +911,8 @@ describe("handleWebhook", () => {
 
       await handleWebhook(api, req, res)
 
-      expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
-      expect(mockSubagentRun).toHaveBeenCalled()
-    })
-
-    it("skips prompted events with stop signal", async () => {
-      const { handleWebhook } = await import("../webhook-handler.js")
-      const api = makeApi()
-      const payload = uniquePrompted({
-        agentActivity: { signal: "stop", content: { body: "stop" } },
-      })
-      const { req, res } = makeSignedReq(payload, SECRET)
-
-      await handleWebhook(api, req, res)
-
-      expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
-      expect(mockSubagentRun).not.toHaveBeenCalled()
-    })
-
-    it("skips follow-up when agent already running for same issue (activeRuns guard)", async () => {
-      const { handleWebhook } = await import("../webhook-handler.js")
-      const api = makeApi()
-
-      const n = uid++
-      const issueId = `issue-uid-${n}`
-
-      // Session created for this issue — adds issueId to activeRuns
-      const createdPayload = makeAgentSessionCreated({
-        createdAt: `2099-10-01T00:00:${String(n).padStart(2, "0")}.000Z`,
-        agentSession: {
-          id: `sess-uid-${n}`,
-          issue: {
-            id: issueId,
-            identifier: `ENG-${n + 100}`,
-            title: `Issue ${n}`,
-            description: `Desc ${n}`,
-            url: `https://linear.app/eng/issue/ENG-${n + 100}`,
-            team: { id: "team-001", key: "ENG", name: "Engineering" },
-          },
-        },
-      })
-      const { req: req1, res: res1 } = makeSignedReq(createdPayload, SECRET)
-      await handleWebhook(api, req1, res1)
-      expect(mockSubagentRun).toHaveBeenCalledTimes(1)
-
-      // Prompted event for the same issue — should be blocked
-      const n2 = uid++
-      const promptedPayload = makeAgentSessionPrompted({
-        createdAt: `2099-10-01T00:01:${String(n2).padStart(2, "0")}.000Z`,
-        agentSession: {
-          id: `sess-uid-${n2}`,
-          issue: { id: issueId, identifier: `ENG-${n + 100}`, url: `https://linear.app/eng/issue/ENG-${n + 100}` },
-        },
-        agentActivity: { content: { body: "Follow-up" }, signal: null },
-      })
-      const { req: req2, res: res2 } = makeSignedReq(promptedPayload, SECRET)
-      await handleWebhook(api, req2, res2)
-
-      expect(res2.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
-      expect(mockSubagentRun).toHaveBeenCalledTimes(1) // second was blocked
-    })
-
-    it("clears activeRuns after subagent.run() throws in handleSessionPrompted", async () => {
-      const { handleWebhook } = await import("../webhook-handler.js")
-      const api = makeApi()
-
-      // First prompted fails
-      mockSubagentRun.mockRejectedValueOnce(new Error("agent crashed"))
-      const payload1 = uniquePrompted()
-      const { req: req1, res: res1 } = makeSignedReq(payload1, SECRET)
-      await handleWebhook(api, req1, res1)
-      expect(res1.writeHead).toHaveBeenCalledWith(500, expect.any(Object))
-
-      // Retry for same issue (different session) — should be allowed
-      mockSubagentRun.mockResolvedValueOnce(undefined)
-      const n = uid++
-      const payload2 = makeAgentSessionPrompted({
-        createdAt: `2099-11-01T00:00:${String(n).padStart(2, "0")}.000Z`,
-        agentSession: {
-          id: `sess-retry-${n}`,
-          issue: payload1.agentSession.issue,
-        },
-        agentActivity: { content: { body: "Retry prompt" }, signal: null },
-      })
-      const { req: req2, res: res2 } = makeSignedReq(payload2, SECRET)
-      await handleWebhook(api, req2, res2)
-
-      expect(res2.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
-      expect(mockSubagentRun).toHaveBeenCalledTimes(2)
-    })
-
-    it("skips prompted events without content body", async () => {
-      const { handleWebhook } = await import("../webhook-handler.js")
-      const api = makeApi()
-      const payload = uniquePrompted({
-        agentActivity: { content: { body: null }, signal: null },
-      })
-      const { req, res } = makeSignedReq(payload, SECRET)
-
-      await handleWebhook(api, req, res)
-
-      expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
-      expect(mockSubagentRun).not.toHaveBeenCalled()
-    })
-
-    it("handleSessionPrompted blocks when agent already running from created event", async () => {
-      const { handleWebhook } = await import("../webhook-handler.js")
-      const api = makeApi()
-
-      // First: created event dispatches agent
-      const created = uniqueCreated()
-      const { req, res } = makeSignedReq(created, SECRET)
-      await handleWebhook(api, req, res)
-      expect(mockSubagentRun).toHaveBeenCalledTimes(1)
-
-      // Second: prompted for SAME issue (different session ID to bypass dedup)
-      const prompted = uniquePrompted({
-        agentSession: { id: "sess-prompt", issue: created.agentSession.issue },
-        agentActivity: { content: { body: "follow up" }, signal: null },
-      })
-      const { req: r2, res: res2 } = makeSignedReq(prompted, SECRET)
-      await handleWebhook(api, r2, res2)
-
-      // activeRuns guard prevents second dispatch
-      expect(mockSubagentRun).toHaveBeenCalledTimes(1)
+      const dispatchCall = mockDispatchInboundReplyWithBase.mock.calls[0][0]
+      expect(dispatchCall.ctxPayload.Body).toContain("Follow-up question")
     })
   })
 
@@ -887,7 +924,7 @@ describe("handleWebhook", () => {
       const { handleWebhook } = await import("../webhook-handler.js")
       const api = makeApi({ accessToken: "lin_test_token" })
 
-      // Mock fetch for: getIssueDetails (for handleCommentCreate)
+      // Mock fetch for getIssueDetails
       mockFetch.mockResolvedValueOnce({
         ok: true,
         json: () =>
@@ -926,14 +963,12 @@ describe("handleWebhook", () => {
       await handleWebhook(api, req, res)
 
       expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
-      // Comment fallback path should dispatch agent
-      expect(mockSubagentRun).toHaveBeenCalled()
+      expect(mockDispatchInboundReplyWithBase).toHaveBeenCalled()
     })
 
     it("comment fallback skips when no token available", async () => {
       const { handleWebhook } = await import("../webhook-handler.js")
-      const api = makeApi()
-      // No accessToken configured
+      const api = makeApi() // No accessToken configured
       const payload = {
         type: "Comment",
         action: "create",
@@ -949,7 +984,7 @@ describe("handleWebhook", () => {
       await handleWebhook(api, req, res)
 
       expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
-      expect(mockSubagentRun).not.toHaveBeenCalled()
+      expect(mockDispatchInboundReplyWithBase).not.toHaveBeenCalled()
     })
 
     it("comment fallback handles getIssueDetails failure gracefully", async () => {
@@ -973,7 +1008,122 @@ describe("handleWebhook", () => {
       await handleWebhook(api, req, res)
 
       expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
-      expect(mockSubagentRun).not.toHaveBeenCalled()
+      expect(mockDispatchInboundReplyWithBase).not.toHaveBeenCalled()
+    })
+
+    it("skips Comment without mention trigger", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi()
+      const payload = {
+        type: "Comment",
+        action: "create",
+        createdAt: `2026-04-01T14:00:${String(uid++).padStart(2, "0")}.000Z`,
+        data: {
+          id: `comment-uid-${uid}`,
+          body: "Just a normal comment without trigger",
+          issue: { id: `issue-comment-${uid}` },
+        },
+      }
+      const { req, res } = makeSignedReq(payload, SECRET)
+
+      await handleWebhook(api, req, res)
+
+      expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
+      expect(mockDispatchInboundReplyWithBase).not.toHaveBeenCalled()
+    })
+
+    it("skips comments authored by the bot (self-trigger prevention)", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const botUserId = "bot-user-uuid-001"
+      const api = makeApi({ accessToken: "lin_test_token", botUserId })
+
+      const payload = {
+        type: "Comment",
+        action: "create",
+        createdAt: `2026-04-01T16:00:${String(uid++).padStart(2, "0")}.000Z`,
+        actor: { id: botUserId, name: "Linus Bot" },
+        data: {
+          id: `comment-bot-${uid}`,
+          body: "@Linus I've completed the fix as requested",
+          issue: { id: `issue-bot-${uid}` },
+        },
+      }
+      const { req, res } = makeSignedReq(payload, SECRET)
+
+      await handleWebhook(api, req, res)
+
+      expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
+      expect(mockDispatchInboundReplyWithBase).not.toHaveBeenCalled()
+    })
+
+    it("processes comments from non-bot users even when botUserId is configured", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi({ accessToken: "lin_test_token", botUserId: "bot-user-uuid-001" })
+
+      const commentIssueId = `issue-nonbot-${uid}`
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            data: {
+              issue: {
+                id: commentIssueId,
+                identifier: "ENG-66",
+                title: "Non-Bot Comment",
+                description: "Test",
+                url: "https://linear.app/eng/issue/ENG-66",
+                state: { name: "Todo", type: "unstarted" },
+                creator: null,
+                assignee: null,
+                labels: { nodes: [] },
+                team: { id: "team-001", key: "ENG", name: "Engineering" },
+                comments: { nodes: [] },
+                project: null,
+              },
+            },
+          }),
+      })
+
+      const payload = {
+        type: "Comment",
+        action: "create",
+        createdAt: `2026-04-01T16:00:${String(uid++).padStart(2, "0")}.000Z`,
+        actor: { id: "human-user-uuid-001", name: "Alice" },
+        data: {
+          id: `comment-nonbot-${uid}`,
+          body: "@Linus can you look at this?",
+          issue: { id: commentIssueId },
+        },
+      }
+      const { req, res } = makeSignedReq(payload, SECRET)
+
+      await handleWebhook(api, req, res)
+
+      expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
+      expect(mockDispatchInboundReplyWithBase).toHaveBeenCalled()
+    })
+
+    it("skips comments when actor has no id (no comparison possible)", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi({ accessToken: "lin_test_token", botUserId: "bot-user-uuid-001" })
+
+      const payload = {
+        type: "Comment",
+        action: "create",
+        createdAt: `2026-04-01T18:00:${String(uid++).padStart(2, "0")}.000Z`,
+        actor: { name: "Linus Bot" },
+        data: {
+          id: `comment-noactorid-${uid}`,
+          body: "@Linus this comment has no actor.id",
+          issue: { id: `issue-noactorid-${uid}` },
+        },
+      }
+      const { req, res } = makeSignedReq(payload, SECRET)
+
+      await handleWebhook(api, req, res)
+
+      // Without actor.id, the filter can't match — passes through but no token mock
+      expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
     })
 
     it("comment fallback updates status to In Progress", async () => {
@@ -981,8 +1131,6 @@ describe("handleWebhook", () => {
       const api = makeApi({ accessToken: "lin_test_token" })
 
       const commentIssueId = `issue-cf-status-${uid}`
-      // handleCommentCreate calls getIssueDetails, then updateIssueState calls:
-      //   getIssueDetails again + getTeamStates + issueUpdate
       mockFetch
         // 1) getIssueDetails (handleCommentCreate)
         .mockResolvedValueOnce({
@@ -1058,630 +1206,8 @@ describe("handleWebhook", () => {
       await handleWebhook(api, req, res)
 
       expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
-      expect(mockSubagentRun).toHaveBeenCalled()
-      // 4 fetch calls: getIssueDetails (handleCommentCreate) + getIssueDetails + getTeamStates + issueUpdate (updateIssueState)
+      expect(mockDispatchInboundReplyWithBase).toHaveBeenCalled()
       expect(mockFetch).toHaveBeenCalledTimes(4)
-    })
-
-    it("skips second comment when agent already running for same issue (activeRuns guard)", async () => {
-      const { handleWebhook } = await import("../webhook-handler.js")
-      const api = makeApi({ accessToken: "lin_test_token" })
-
-      const commentIssueId = `issue-ar-comment-${uid}`
-
-      // First comment — agent dispatches and stays in activeRuns
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: () =>
-          Promise.resolve({
-            data: {
-              issue: {
-                id: commentIssueId,
-                identifier: "ENG-77",
-                title: "AR Comment Test",
-                description: "Test",
-                url: "https://linear.app/eng/issue/ENG-77",
-                state: { name: "Todo", type: "unstarted" },
-                creator: null,
-                assignee: null,
-                labels: { nodes: [] },
-                team: { id: "team-001", key: "ENG", name: "Engineering" },
-                comments: { nodes: [] },
-                project: null,
-              },
-            },
-          }),
-      })
-
-      const payload1 = {
-        type: "Comment",
-        action: "create",
-        createdAt: `2026-04-01T13:10:${String(uid++).padStart(2, "0")}.000Z`,
-        data: { id: `comment-ar-1-${uid}`, body: "@Linus first", issue: { id: commentIssueId } },
-      }
-      const { req: req1, res: res1 } = makeSignedReq(payload1, SECRET)
-      await handleWebhook(api, req1, res1)
-      expect(mockSubagentRun).toHaveBeenCalledTimes(1)
-
-      // Second comment for same issue — blocked by activeRuns
-      const payload2 = {
-        type: "Comment",
-        action: "create",
-        createdAt: `2026-04-01T13:11:${String(uid++).padStart(2, "0")}.000Z`,
-        data: { id: `comment-ar-2-${uid}`, body: "@Linus second", issue: { id: commentIssueId } },
-      }
-      const { req: req2, res: res2 } = makeSignedReq(payload2, SECRET)
-      await handleWebhook(api, req2, res2)
-
-      expect(res2.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
-      expect(mockSubagentRun).toHaveBeenCalledTimes(1) // blocked
-    })
-
-    it("clears activeRuns after subagent.run() throws in handleCommentCreate", async () => {
-      const { handleWebhook } = await import("../webhook-handler.js")
-      const api = makeApi({ accessToken: "lin_test_token" })
-
-      const commentIssueId = `issue-comment-fail-${uid}`
-      const issueData = {
-        id: commentIssueId,
-        identifier: "ENG-76",
-        title: "Comment Failure Test",
-        description: "Test",
-        url: "https://linear.app/eng/issue/ENG-76",
-        state: { name: "Todo", type: "unstarted" },
-        creator: null,
-        assignee: null,
-        labels: { nodes: [] },
-        team: { id: "team-001", key: "ENG", name: "Engineering" },
-        comments: { nodes: [] },
-        project: null,
-      }
-
-      // First: getIssueDetails succeeds but run() throws
-      mockSubagentRun.mockRejectedValueOnce(new Error("agent crashed"))
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: () => Promise.resolve({ data: { issue: issueData } }),
-      })
-
-      const payload1 = {
-        type: "Comment",
-        action: "create",
-        createdAt: `2026-04-01T14:00:${String(uid++).padStart(2, "0")}.000Z`,
-        data: { id: `comment-fail-1-${uid}`, body: "@Linus first failing", issue: { id: commentIssueId } },
-      }
-      const { req: req1, res: res1 } = makeSignedReq(payload1, SECRET)
-      await handleWebhook(api, req1, res1)
-      expect(res1.writeHead).toHaveBeenCalledWith(500, expect.any(Object))
-
-      // Second: should be allowed now that activeRuns is cleared
-      mockSubagentRun.mockResolvedValueOnce(undefined)
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: () => Promise.resolve({ data: { issue: issueData } }),
-      })
-
-      const payload2 = {
-        type: "Comment",
-        action: "create",
-        createdAt: `2026-04-01T14:01:${String(uid++).padStart(2, "0")}.000Z`,
-        data: { id: `comment-fail-2-${uid}`, body: "@Linus second", issue: { id: commentIssueId } },
-      }
-      const { req: req2, res: res2 } = makeSignedReq(payload2, SECRET)
-      await handleWebhook(api, req2, res2)
-
-      expect(res2.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
-      expect(mockSubagentRun).toHaveBeenCalledTimes(2)
-    })
-
-    it("skips Comment without mention trigger", async () => {
-      const { handleWebhook } = await import("../webhook-handler.js")
-      const api = makeApi()
-      const payload = {
-        type: "Comment",
-        action: "create",
-        createdAt: `2026-04-01T14:00:${String(uid++).padStart(2, "0")}.000Z`,
-        data: {
-          id: `comment-uid-${uid}`,
-          body: "Just a normal comment without trigger",
-          issue: { id: `issue-comment-${uid}` },
-        },
-      }
-      const { req, res } = makeSignedReq(payload, SECRET)
-
-      await handleWebhook(api, req, res)
-
-      expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
-      expect(mockSubagentRun).not.toHaveBeenCalled()
-    })
-
-    it("skips comments authored by the bot (self-trigger prevention)", async () => {
-      const { handleWebhook } = await import("../webhook-handler.js")
-      const botUserId = "bot-user-uuid-001"
-      const api = makeApi({ accessToken: "lin_test_token", botUserId })
-
-      const payload = {
-        type: "Comment",
-        action: "create",
-        createdAt: `2026-04-01T16:00:${String(uid++).padStart(2, "0")}.000Z`,
-        actor: { id: botUserId, name: "Linus Bot" },
-        data: {
-          id: `comment-bot-${uid}`,
-          body: "@Linus I've completed the fix as requested",
-          issue: { id: `issue-bot-${uid}` },
-        },
-      }
-      const { req, res } = makeSignedReq(payload, SECRET)
-
-      await handleWebhook(api, req, res)
-
-      expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
-      expect(mockSubagentRun).not.toHaveBeenCalled()
-    })
-
-    it("processes comments from non-bot users even when botUserId is configured", async () => {
-      const { handleWebhook } = await import("../webhook-handler.js")
-      const api = makeApi({ accessToken: "lin_test_token", botUserId: "bot-user-uuid-001" })
-
-      const commentIssueId = `issue-nonbot-${uid}`
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: () =>
-          Promise.resolve({
-            data: {
-              issue: {
-                id: commentIssueId,
-                identifier: "ENG-66",
-                title: "Non-Bot Comment",
-                description: "Test",
-                url: "https://linear.app/eng/issue/ENG-66",
-                state: { name: "Todo", type: "unstarted" },
-                creator: null,
-                assignee: null,
-                labels: { nodes: [] },
-                team: { id: "team-001", key: "ENG", name: "Engineering" },
-                comments: { nodes: [] },
-                project: null,
-              },
-            },
-          }),
-      })
-
-      const payload = {
-        type: "Comment",
-        action: "create",
-        createdAt: `2026-04-01T16:00:${String(uid++).padStart(2, "0")}.000Z`,
-        actor: { id: "human-user-uuid-001", name: "Alice" },
-        data: {
-          id: `comment-nonbot-${uid}`,
-          body: "@Linus can you look at this?",
-          issue: { id: commentIssueId },
-        },
-      }
-      const { req, res } = makeSignedReq(payload, SECRET)
-
-      await handleWebhook(api, req, res)
-
-      expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
-      expect(mockSubagentRun).toHaveBeenCalled()
-    })
-
-    it("processes comments when botUserId is not configured (backward compatible)", async () => {
-      const { handleWebhook } = await import("../webhook-handler.js")
-      const api = makeApi({ accessToken: "lin_test_token" })
-      // No botUserId in config
-
-      const commentIssueId = `issue-nobbotid-${uid}`
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: () =>
-          Promise.resolve({
-            data: {
-              issue: {
-                id: commentIssueId,
-                identifier: "ENG-55",
-                title: "No BotUserId",
-                description: "Test",
-                url: "https://linear.app/eng/issue/ENG-55",
-                state: { name: "Todo", type: "unstarted" },
-                creator: null,
-                assignee: null,
-                labels: { nodes: [] },
-                team: { id: "team-001", key: "ENG", name: "Engineering" },
-                comments: { nodes: [] },
-                project: null,
-              },
-            },
-          }),
-      })
-
-      const payload = {
-        type: "Comment",
-        action: "create",
-        createdAt: `2026-04-01T17:00:${String(uid++).padStart(2, "0")}.000Z`,
-        actor: { id: "some-user-001", name: "Anyone" },
-        data: {
-          id: `comment-nobbotid-${uid}`,
-          body: "@Linus help me",
-          issue: { id: commentIssueId },
-        },
-      }
-      const { req, res } = makeSignedReq(payload, SECRET)
-
-      await handleWebhook(api, req, res)
-
-      expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
-      expect(mockSubagentRun).toHaveBeenCalled()
-    })
-
-    it("skips bot comments when actor has no id but matches by name (edge case with missing actor.id)", async () => {
-      const { handleWebhook } = await import("../webhook-handler.js")
-      const api = makeApi({ accessToken: "lin_test_token", botUserId: "bot-user-uuid-001" })
-
-      // Actor without id field — should NOT be filtered (no id to compare)
-      const payload = {
-        type: "Comment",
-        action: "create",
-        createdAt: `2026-04-01T18:00:${String(uid++).padStart(2, "0")}.000Z`,
-        actor: { name: "Linus Bot" },
-        data: {
-          id: `comment-noactorid-${uid}`,
-          body: "@Linus this comment has no actor.id",
-          issue: { id: `issue-noactorid-${uid}` },
-        },
-      }
-      const { req, res } = makeSignedReq(payload, SECRET)
-
-      await handleWebhook(api, req, res)
-
-      // Without actor.id, the filter can't match — so it passes through
-      // but won't dispatch because no token was mocked for fetch
-      expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
-    })
-
-    it("rolls back issue state to Todo when subagent.run() throws after In Progress in handleCommentCreate", async () => {
-      const { handleWebhook } = await import("../webhook-handler.js")
-      const api = makeApi({ accessToken: "lin_test_token" })
-
-      const commentIssueId = `issue-cf-rollback-${uid}`
-      const issueData = {
-        id: commentIssueId,
-        identifier: "ENG-RB",
-        title: "Rollback Test",
-        description: "Test",
-        url: "https://linear.app/eng/issue/ENG-RB",
-        state: { name: "Todo", type: "unstarted" },
-        creator: null,
-        assignee: null,
-        labels: { nodes: [] },
-        team: { id: "team-001", key: "ENG", name: "Engineering" },
-        comments: { nodes: [] },
-        project: null,
-      }
-
-      mockSubagentRun.mockRejectedValueOnce(new Error("agent crashed"))
-
-      // 1) getIssueDetails (handleCommentCreate)
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: () => Promise.resolve({ data: { issue: issueData } }),
-      })
-      // 2) getIssueDetails (updateIssueState internal)
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: () =>
-          Promise.resolve({
-            data: { issue: { id: commentIssueId, team: { id: "team-001", key: "ENG", name: "Engineering" } } },
-          }),
-      })
-      // 3) getTeamStates
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: () =>
-          Promise.resolve({
-            data: {
-              team: {
-                states: {
-                  nodes: [
-                    { id: "s-todo", name: "Todo" },
-                    { id: "s-ip", name: "In Progress" },
-                  ],
-                },
-              },
-            },
-          }),
-      })
-      // 4) issueUpdate → In Progress
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: () => Promise.resolve({ data: { issueUpdate: { success: true } } }),
-      })
-      // 5) getIssueDetails (rollback)
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: () =>
-          Promise.resolve({
-            data: { issue: { id: commentIssueId, team: { id: "team-001", key: "ENG", name: "Engineering" } } },
-          }),
-      })
-      // 6) getTeamStates (rollback)
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: () =>
-          Promise.resolve({
-            data: {
-              team: {
-                states: {
-                  nodes: [
-                    { id: "s-todo", name: "Todo" },
-                    { id: "s-ip", name: "In Progress" },
-                  ],
-                },
-              },
-            },
-          }),
-      })
-      // 7) issueUpdate → Todo (rollback succeeds)
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: () => Promise.resolve({ data: { issueUpdate: { success: true } } }),
-      })
-
-      const payload = {
-        type: "Comment",
-        action: "create",
-        createdAt: `2026-04-01T19:00:${String(uid++).padStart(2, "0")}.000Z`,
-        data: {
-          id: `comment-rollback-${uid}`,
-          body: "@Linus rollback test",
-          issue: { id: commentIssueId },
-        },
-      }
-      const { req, res } = makeSignedReq(payload, SECRET)
-      await handleWebhook(api, req, res)
-
-      expect(res.writeHead).toHaveBeenCalledWith(500, expect.any(Object))
-      expect(mockFetch).toHaveBeenCalledTimes(7)
-      // Rollback call (7th fetch) should target "Todo" state
-      const rollbackBody = JSON.parse(mockFetch.mock.calls[6][1].body)
-      expect(rollbackBody.variables.input.stateId).toBe("s-todo")
-    })
-
-    it("logs warning when rollback fails after subagent.run() throws in handleCommentCreate", async () => {
-      const { handleWebhook } = await import("../webhook-handler.js")
-      const api = makeApi({ accessToken: "lin_test_token" })
-
-      const commentIssueId = `issue-cf-rb-fail-${uid}`
-      const issueData = {
-        id: commentIssueId,
-        identifier: "ENG-RBF",
-        title: "Rollback Fail Test",
-        description: "Test",
-        url: "https://linear.app/eng/issue/ENG-RBF",
-        state: { name: "Todo", type: "unstarted" },
-        creator: null,
-        assignee: null,
-        labels: { nodes: [] },
-        team: { id: "team-001", key: "ENG", name: "Engineering" },
-        comments: { nodes: [] },
-        project: null,
-      }
-
-      mockSubagentRun.mockRejectedValueOnce(new Error("agent crashed"))
-
-      // 1) getIssueDetails (handleCommentCreate)
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: () => Promise.resolve({ data: { issue: issueData } }),
-      })
-      // 2) getIssueDetails (updateIssueState internal)
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: () =>
-          Promise.resolve({
-            data: { issue: { id: commentIssueId, team: { id: "team-001", key: "ENG", name: "Engineering" } } },
-          }),
-      })
-      // 3) getTeamStates
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: () =>
-          Promise.resolve({
-            data: {
-              team: {
-                states: {
-                  nodes: [
-                    { id: "s-todo", name: "Todo" },
-                    { id: "s-ip", name: "In Progress" },
-                  ],
-                },
-              },
-            },
-          }),
-      })
-      // 4) issueUpdate → In Progress
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: () => Promise.resolve({ data: { issueUpdate: { success: true } } }),
-      })
-      // 5) getIssueDetails (rollback)
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: () =>
-          Promise.resolve({
-            data: { issue: { id: commentIssueId, team: { id: "team-001", key: "ENG", name: "Engineering" } } },
-          }),
-      })
-      // 6) getTeamStates (rollback)
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: () =>
-          Promise.resolve({
-            data: {
-              team: {
-                states: {
-                  nodes: [
-                    { id: "s-todo", name: "Todo" },
-                    { id: "s-ip", name: "In Progress" },
-                  ],
-                },
-              },
-            },
-          }),
-      })
-      // 7) issueUpdate → Todo (rollback FAILS)
-      mockFetch.mockRejectedValueOnce(new Error("rollback failed"))
-
-      const payload = {
-        type: "Comment",
-        action: "create",
-        createdAt: `2026-04-01T20:00:${String(uid++).padStart(2, "0")}.000Z`,
-        data: {
-          id: `comment-rb-fail-${uid}`,
-          body: "@Linus rollback fail test",
-          issue: { id: commentIssueId },
-        },
-      }
-      const { req, res } = makeSignedReq(payload, SECRET)
-      await handleWebhook(api, req, res)
-
-      expect(res.writeHead).toHaveBeenCalledWith(500, expect.any(Object))
-      // Should have logged the rollback failure
-      expect(mockLogger.warn).toHaveBeenCalledWith(expect.stringContaining("failed to rollback status"))
-    })
-
-    it("handleCommentCreate blocks when agent already running from created event (cross-type activeRuns)", async () => {
-      const { handleWebhook } = await import("../webhook-handler.js")
-      const api = makeApi({ accessToken: "lin_test_token" })
-
-      // First: created event dispatches agent
-      const created = uniqueCreated()
-      const { req, res } = makeSignedReq(created, SECRET)
-      await handleWebhook(api, req, res)
-      expect(mockSubagentRun).toHaveBeenCalledTimes(1)
-
-      // Second: comment fallback for SAME issue — should be blocked by activeRuns
-      const commentPayload = {
-        type: "Comment",
-        action: "create",
-        createdAt: `2026-04-01T15:00:${String(uid++).padStart(2, "0")}.000Z`,
-        data: {
-          id: `comment-cross-type-${uid}`,
-          body: "@Linus please help with this",
-          issue: { id: created.agentSession.issue.id },
-        },
-      }
-      const { req: r2, res: res2 } = makeSignedReq(commentPayload, SECRET)
-      await handleWebhook(api, r2, res2)
-
-      expect(res2.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
-      // activeRuns guard prevents second dispatch
-      expect(mockSubagentRun).toHaveBeenCalledTimes(1)
-    })
-  })
-
-  // -----------------------------------------------------------------------
-  describe("cross-path activeRuns guards", () => {
-    // -----------------------------------------------------------------------
-
-    it("handleSessionCreated blocks handleCommentCreate for same issue (cross-path guard)", async () => {
-      const { handleWebhook } = await import("../webhook-handler.js")
-      const api = makeApi({ accessToken: "lin_test_token" })
-
-      const crossIssueId = `issue-cross-${uid}`
-
-      // First: AgentSessionEvent created — adds to activeRuns
-      const created = makeAgentSessionCreated({
-        createdAt: `2099-12-01T00:00:${String(uid++).padStart(2, "0")}.000Z`,
-        agentSession: {
-          id: `sess-cross-${uid}`,
-          issue: {
-            id: crossIssueId,
-            identifier: `ENG-${uid + 100}`,
-            title: `Cross issue ${uid}`,
-            description: `Desc ${uid}`,
-            url: `https://linear.app/eng/issue/ENG-${uid + 100}`,
-            team: { id: "team-001", key: "ENG", name: "Engineering" },
-          },
-        },
-      })
-      const { req: req1, res: res1 } = makeSignedReq(created, SECRET)
-      await handleWebhook(api, req1, res1)
-      expect(mockSubagentRun).toHaveBeenCalledTimes(1)
-
-      // Second: Comment create for the same issue — should be blocked by activeRuns
-      const commentPayload = {
-        type: "Comment",
-        action: "create",
-        createdAt: `2099-12-01T00:01:${String(uid++).padStart(2, "0")}.000Z`,
-        data: { id: `comment-cross-${uid}`, body: "@Linus follow up", issue: { id: crossIssueId } },
-      }
-      const { req: req2, res: res2 } = makeSignedReq(commentPayload, SECRET)
-      await handleWebhook(api, req2, res2)
-
-      expect(res2.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
-      expect(mockSubagentRun).toHaveBeenCalledTimes(1) // comment was blocked
-    })
-
-    it("handleCommentCreate blocks handleSessionPrompted for same issue (cross-path guard)", async () => {
-      const { handleWebhook } = await import("../webhook-handler.js")
-      const api = makeApi({ accessToken: "lin_test_token" })
-
-      const crossIssueId = `issue-cross2-${uid}`
-
-      // First: Comment create — adds to activeRuns via comment fallback
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: () =>
-          Promise.resolve({
-            data: {
-              issue: {
-                id: crossIssueId,
-                identifier: `ENG-${uid + 200}`,
-                title: "Cross2 Issue",
-                description: "Test",
-                url: `https://linear.app/eng/issue/ENG-${uid + 200}`,
-                state: { name: "Todo", type: "unstarted" },
-                creator: null,
-                assignee: null,
-                labels: { nodes: [] },
-                team: { id: "team-001", key: "ENG", name: "Engineering" },
-                comments: { nodes: [] },
-                project: null,
-              },
-            },
-          }),
-      })
-
-      const commentPayload = {
-        type: "Comment",
-        action: "create",
-        createdAt: `2099-12-02T00:00:${String(uid++).padStart(2, "0")}.000Z`,
-        data: { id: `comment-cross2-${uid}`, body: "@Linus start here", issue: { id: crossIssueId } },
-      }
-      const { req: req1, res: res1 } = makeSignedReq(commentPayload, SECRET)
-      await handleWebhook(api, req1, res1)
-      expect(mockSubagentRun).toHaveBeenCalledTimes(1)
-
-      // Second: Prompted event for the same issue — should be blocked by activeRuns
-      const n2 = uid++
-      const promptedPayload = makeAgentSessionPrompted({
-        createdAt: `2099-12-02T00:01:${String(n2).padStart(2, "0")}.000Z`,
-        agentSession: {
-          id: `sess-cross2-${n2}`,
-          issue: {
-            id: crossIssueId,
-            identifier: `ENG-${n2 + 200}`,
-            url: `https://linear.app/eng/issue/ENG-${n2 + 200}`,
-          },
-        },
-        agentActivity: { content: { body: "Follow-up after comment" }, signal: null },
-      })
-      const { req: req2, res: res2 } = makeSignedReq(promptedPayload, SECRET)
-      await handleWebhook(api, req2, res2)
-
-      expect(res2.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
-      expect(mockSubagentRun).toHaveBeenCalledTimes(1) // prompted was blocked
     })
   })
 
@@ -1717,82 +1243,7 @@ describe("handleWebhook", () => {
       await handleWebhook(api, req, res)
 
       expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
-      expect(mockSubagentRun).not.toHaveBeenCalled()
-    })
-  })
-
-  // -----------------------------------------------------------------------
-  describe("TTL-based activeRuns expiry", () => {
-    // -----------------------------------------------------------------------
-
-    afterEach(() => {
-      Date.now = realDateNow
-    })
-
-    it("expired activeRuns entry allows re-dispatch after TTL", async () => {
-      const { handleWebhook, ACTIVE_RUN_TTL_MS } = await import("../webhook-handler.js")
-      const api = makeApi()
-
-      // First dispatch — agent starts, session key recorded
-      const now = Date.now()
-      const payload1 = uniqueCreated()
-      const { req: req1, res: res1 } = makeSignedReq(payload1, SECRET)
-      await handleWebhook(api, req1, res1)
-      expect(res1.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
-      expect(mockSubagentRun).toHaveBeenCalledTimes(1)
-
-      // Simulate time passing beyond TTL (crash scenario — clearActiveRun never called)
-      const expiredTime = now + ACTIVE_RUN_TTL_MS + 1000
-      Date.now = () => expiredTime
-
-      // Second dispatch for same issue (different session ID to bypass dedup)
-      // Should succeed because the stale entry was swept
-      mockSubagentRun.mockClear()
-      const n = uid++
-      const payload2 = makeAgentSessionCreated({
-        createdAt: `2099-06-01T00:00:${String(n).padStart(2, "0")}.000Z`,
-        agentSession: {
-          ...makeAgentSessionCreated().agentSession,
-          id: `sess-ttl-${n}`,
-          issue: payload1.agentSession.issue,
-        },
-      })
-      const { req: req2, res: res2 } = makeSignedReq(payload2, SECRET)
-      await handleWebhook(api, req2, res2)
-
-      expect(res2.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
-      expect(mockSubagentRun).toHaveBeenCalledTimes(1)
-    })
-
-    it("does NOT re-dispatch before TTL expires", async () => {
-      const { handleWebhook, ACTIVE_RUN_TTL_MS } = await import("../webhook-handler.js")
-      const api = makeApi()
-
-      const now = Date.now()
-      const payload1 = uniqueCreated()
-      const { req: req1, res: res1 } = makeSignedReq(payload1, SECRET)
-      await handleWebhook(api, req1, res1)
-      expect(mockSubagentRun).toHaveBeenCalledTimes(1)
-
-      // Advance time but stay within TTL
-      Date.now = () => now + ACTIVE_RUN_TTL_MS - 1000
-
-      mockSubagentRun.mockClear()
-      const n = uid++
-      const payload2 = makeAgentSessionCreated({
-        createdAt: `2099-07-01T00:00:${String(n).padStart(2, "0")}.000Z`,
-        agentSession: {
-          ...makeAgentSessionCreated().agentSession,
-          id: `sess-early-${n}`,
-          issue: payload1.agentSession.issue,
-        },
-      })
-      const { req: req2, res: res2 } = makeSignedReq(payload2, SECRET)
-      await handleWebhook(api, req2, res2)
-
-      // activeRuns still has the entry — blocked
-      expect(res2.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
-      expect(mockSubagentRun).not.toHaveBeenCalled()
+      expect(mockDispatchInboundReplyWithBase).not.toHaveBeenCalled()
     })
   })
 })

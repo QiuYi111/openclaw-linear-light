@@ -13,10 +13,10 @@ import {
   dispatchInboundReplyWithBase,
   type OpenClawConfig,
 } from "openclaw/plugin-sdk"
-import { LinearAgentApi, resolveLinearToken } from "./api/linear-api.js"
-import { sanitizePromptInput } from "./utils.js"
-import { getLinearRuntime, setLinearApi } from "./runtime.js"
 import { agentSessionMap } from "../index.js"
+import { LinearAgentApi, resolveLinearToken } from "./api/linear-api.js"
+import { getLinearRuntime, setLinearApi } from "./runtime.js"
+import { sanitizePromptInput } from "./utils.js"
 
 const CHANNEL_ID = "linear" as const
 
@@ -55,11 +55,21 @@ async function readBody(
     const chunks: Buffer[] = []
     let total = 0
     let settled = false
-    const timer = setTimeout(() => { if (!settled) { settled = true; resolve({ ok: false, error: "timeout" }) } }, 5000)
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true
+        resolve({ ok: false, error: "timeout" })
+      }
+    }, 5000)
     req.on("data", (chunk: Buffer) => {
       if (settled) return
       total += chunk.length
-      if (total > maxBytes) { settled = true; clearTimeout(timer); resolve({ ok: false, error: "too large" }); return }
+      if (total > maxBytes) {
+        settled = true
+        clearTimeout(timer)
+        resolve({ ok: false, error: "too large" })
+        return
+      }
       chunks.push(chunk)
     })
     req.on("end", () => {
@@ -69,9 +79,17 @@ async function readBody(
       try {
         const rawBuffer = Buffer.concat(chunks)
         resolve({ ok: true, body: JSON.parse(rawBuffer.toString("utf8")), rawBuffer })
-      } catch { resolve({ ok: false, error: "invalid json" }) }
+      } catch {
+        resolve({ ok: false, error: "invalid json" })
+      }
     })
-    req.on("error", () => { if (!settled) { settled = true; clearTimeout(timer); resolve({ ok: false, error: "read error" }) } })
+    req.on("error", () => {
+      if (!settled) {
+        settled = true
+        clearTimeout(timer)
+        resolve({ ok: false, error: "read error" })
+      }
+    })
   })
 }
 
@@ -127,7 +145,11 @@ export async function handleWebhook(api: OpenClawPluginApi, req: any, res: any):
   }
 }
 
-async function processWebhook(api: OpenClawPluginApi, payload: any, config: Record<string, unknown> | undefined): Promise<void> {
+async function processWebhook(
+  api: OpenClawPluginApi,
+  payload: any,
+  config: Record<string, unknown> | undefined,
+): Promise<void> {
   const { type, action } = payload
 
   if (type === "AgentSessionEvent") {
@@ -146,7 +168,11 @@ async function processWebhook(api: OpenClawPluginApi, payload: any, config: Reco
 // Agent Session events (primary trigger — user @mentions agent)
 // ---------------------------------------------------------------------------
 
-async function handleSessionCreated(api: OpenClawPluginApi, payload: any, config: Record<string, unknown> | undefined): Promise<void> {
+async function handleSessionCreated(
+  api: OpenClawPluginApi,
+  payload: any,
+  config: Record<string, unknown> | undefined,
+): Promise<void> {
   const session = payload.agentSession
   if (!session?.issue) return
 
@@ -204,7 +230,11 @@ async function handleSessionCreated(api: OpenClawPluginApi, payload: any, config
   await dispatchToAgent(api, { issue, body, config })
 }
 
-async function handleSessionPrompted(api: OpenClawPluginApi, payload: any, config: Record<string, unknown> | undefined): Promise<void> {
+async function handleSessionPrompted(
+  api: OpenClawPluginApi,
+  payload: any,
+  config: Record<string, unknown> | undefined,
+): Promise<void> {
   const session = payload.agentSession
   const activity = payload.agentActivity
 
@@ -229,7 +259,11 @@ async function handleSessionPrompted(api: OpenClawPluginApi, payload: any, confi
 // Comment fallback (non-agent-session setups)
 // ---------------------------------------------------------------------------
 
-async function handleCommentCreate(api: OpenClawPluginApi, payload: any, config: Record<string, unknown> | undefined): Promise<void> {
+async function handleCommentCreate(
+  api: OpenClawPluginApi,
+  payload: any,
+  config: Record<string, unknown> | undefined,
+): Promise<void> {
   const comment = payload.data
   if (!(comment?.body && comment?.issue?.id)) return
 
@@ -252,7 +286,11 @@ async function handleCommentCreate(api: OpenClawPluginApi, payload: any, config:
   }
 
   if (config?.autoInProgress !== false) {
-    try { await linearApi.updateIssueState(issueId, "In Progress") } catch { /* best-effort */ }
+    try {
+      await linearApi.updateIssueState(issueId, "In Progress")
+    } catch {
+      /* best-effort */
+    }
   }
 
   const sanitizedPrompt = sanitizePromptInput(comment.body)
@@ -297,12 +335,11 @@ async function dispatchToAgent(
     peer: { kind: "direct", id: peerId },
   })
 
-  api.logger.info(`Linear Light: route resolved: agentId=${route.agentId} sessionKey=${route.sessionKey} model=${route.model}`)
-
-  const storePath = core.channel.session.resolveStorePath(
-    (cfg as any).session?.store,
-    { agentId: route.agentId },
+  api.logger.info(
+    `Linear Light: route resolved: agentId=${route.agentId} sessionKey=${route.sessionKey} model=${route.model}`,
   )
+
+  const storePath = core.channel.session.resolveStorePath((cfg as any).session?.store, { agentId: route.agentId })
 
   const ctxPayload = core.channel.reply.finalizeInboundContext({
     Body: body,
@@ -334,7 +371,9 @@ async function dispatchToAgent(
       await api2.createComment(issue.id, payload.text)
       api.logger.info(`Linear Light: delivered comment to ${issue.identifier}`)
     } catch (err) {
-      api.logger.error(`Linear Light: deliver error for ${issue.identifier}: ${err instanceof Error ? err.message : String(err)}`)
+      api.logger.error(
+        `Linear Light: deliver error for ${issue.identifier}: ${err instanceof Error ? err.message : String(err)}`,
+      )
     }
   }
 
@@ -357,7 +396,8 @@ async function dispatchToAgent(
     },
     deliver,
     onRecordError: (err: unknown) => api.logger.error(`Linear Light: record inbound error: ${String(err)}`),
-    onDispatchError: (err: unknown, info: { kind: string }) => api.logger.error(`Linear Light: dispatch error [${info.kind}]: ${String(err)}`),
+    onDispatchError: (err: unknown, info: { kind: string }) =>
+      api.logger.error(`Linear Light: dispatch error [${info.kind}]: ${String(err)}`),
   })
 
   api.logger.info(`Linear Light: dispatched agent for ${issue.identifier} (channel mode)`)
