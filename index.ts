@@ -17,6 +17,7 @@ import type { ChannelPlugin, OpenClawPluginApi } from "openclaw/plugin-sdk"
 import { getChatChannelMeta } from "openclaw/plugin-sdk/core"
 import { onAfterToolCall, onAgentEnd, onBeforeToolCall, onLlmOutput } from "./src/activity-stream.js"
 import { LinearAgentApi, resolveLinearToken } from "./src/api/linear-api.js"
+import { validateConfig } from "./src/config-validation.js"
 import { handleOAuthCallback, handleOAuthInit } from "./src/oauth-handler.js"
 import { setLinearApi, setLinearRuntime } from "./src/runtime.js"
 import { handleWebhook } from "./src/webhook-handler.js"
@@ -60,6 +61,41 @@ export default function register(api: OpenClawPluginApi) {
       await handleOAuthInit(api, req, res)
     },
   })
+
+  // Health / status endpoint — always available (works even without a token)
+  api.registerHttpRoute({
+    path: "/linear-light/status",
+    auth: "plugin",
+    match: "exact",
+    handler: async (_req, res) => {
+      const validation = validateConfig(config)
+      const tokenInfo = resolveLinearToken(config)
+
+      const configured = {
+        webhook: !!config?.webhookSecret,
+        oauth: !!(config?.linearClientId && config?.linearClientSecret),
+        token: !!tokenInfo.accessToken,
+      }
+
+      const status = validation.valid && configured.token ? "ok" : "degraded"
+
+      res.writeHead(200, { "Content-Type": "application/json" })
+      res.end(
+        JSON.stringify({
+          status,
+          version: "0.1.0",
+          configured,
+          errors: validation.errors,
+          warnings: validation.warnings,
+        }),
+      )
+    },
+  })
+
+  // Log config validation results at startup
+  const validation = validateConfig(config)
+  for (const err of validation.errors) api.logger.error(`Linear Light: ${err}`)
+  for (const warn of validation.warnings) api.logger.warn(`Linear Light: ${warn}`)
 
   const tokenInfo = resolveLinearToken(config)
   if (!tokenInfo.accessToken) {

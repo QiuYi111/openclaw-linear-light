@@ -196,11 +196,27 @@ export async function handleOAuthCallback(api: OpenClawPluginApi, req: any, res:
     api.logger.info("Linear Light: OAuth token obtained and stored successfully")
 
     res.writeHead(200, { "Content-Type": "text/html" })
-    res.end(`
-      <h1>OAuth Setup Complete</h1>
-      <p>Linear Light is now connected. You can close this page.</p>
-      <script>window.close()</script>
-    `)
+    res.end(`<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Linear Light — Connected</title>
+<style>
+  body{font-family:system-ui,-apple-system,sans-serif;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;background:#0a0a0a;color:#e0e0e0}
+  .card{text-align:center;padding:3rem;border-radius:12px;background:#141414;border:1px solid #2a2a2a;max-width:420px}
+  h1{color:#4ade80;font-size:1.5rem;margin:0 0 0.5rem}
+  p{color:#a0a0a0;margin:0.5rem 0}
+  a{color:#60a5fa;text-decoration:none}a:hover{text-decoration:underline}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>✓ Connected</h1>
+  <p>Linear Light is now linked to your workspace.</p>
+  <p><a href="/linear-light/status">Check integration status →</a></p>
+  <p style="margin-top:1.5rem;font-size:0.85rem;color:#666">You can safely close this tab.</p>
+</div>
+<script>try{window.close()}catch(e){}</script>
+</body>
+</html>`)
   } catch (err) {
     api.logger.error(`Linear Light: OAuth callback exception: ${err}`)
     res.writeHead(500, { "Content-Type": "text/html" })

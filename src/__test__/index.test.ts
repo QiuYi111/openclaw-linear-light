@@ -694,3 +694,47 @@ describe("outbound sendText", () => {
     expect(result.error).toContain("500")
   })
 })
+
+describe("health endpoint /linear-light/status", () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it("returns ok when fully configured", async () => {
+    const mod = await import("../../index.js")
+    const api = makeApi()
+
+    mod.default(api)
+
+    const statusRoute = api.registerHttpRoute.mock.calls.find((call: any) => call[0].path === "/linear-light/status")
+    expect(statusRoute).toBeDefined()
+
+    const res = { writeHead: vi.fn(), end: vi.fn() }
+    await statusRoute[0].handler({}, res)
+
+    expect(res.writeHead).toHaveBeenCalledWith(200, expect.objectContaining({ "Content-Type": "application/json" }))
+    const body = JSON.parse(res.end.mock.calls[0][0])
+    expect(body.status).toBe("ok")
+    expect(body.version).toBe("0.1.0")
+    expect(body.configured.webhook).toBe(true)
+    expect(body.configured.token).toBe(true)
+  })
+
+  it("returns degraded when no access token", async () => {
+    const mod = await import("../../index.js")
+    const api = makeApi({ accessToken: undefined })
+    delete process.env.LINEAR_ACCESS_TOKEN
+    delete process.env.LINEAR_API_KEY
+
+    mod.default(api)
+
+    const statusRoute = api.registerHttpRoute.mock.calls.find((call: any) => call[0].path === "/linear-light/status")
+
+    const res = { writeHead: vi.fn(), end: vi.fn() }
+    await statusRoute[0].handler({}, res)
+
+    const body = JSON.parse(res.end.mock.calls[0][0])
+    expect(body.status).toBe("degraded")
+    expect(body.configured.token).toBe(false)
+  })
+})

@@ -125,12 +125,66 @@ All options are optional except where noted.
 | `webhookSecret` | `string` | — | **Required.** Linear webhook signing secret |
 | `mentionTrigger` | `string` | `"Linus"` | Text that triggers the agent in comments |
 | `autoInProgress` | `boolean` | `true` | Auto-set issue to "In Progress" when agent starts |
-| `notifyOnComplete` | `boolean` | `true` | Send notification when agent finishes |
-| `notificationChannel` | `string` | `"telegram"` | Channel for completion notifications |
-| `notificationTarget` | `string` | — | Target chat/user ID for notifications |
+| `agentIdentity` | `string` | *(see default)* | Custom system identity injected into agent prompts. Default instructs the agent not to use a personal assistant identity and lists available tools. |
+| `initialResponseTemplate` | `string` | `"Received, processing {identifier}: {title}"` | Template for the initial activity response. Supports `{identifier}` and `{title}` placeholders. |
 | `linearClientId` | `string` | — | **Required for OAuth.** Linear OAuth client ID |
 | `linearClientSecret` | `string` | — | **Required for OAuth.** Linear OAuth client secret |
-| `sessionPrefix` | `string` | `"linear:"` | Prefix for session keys |
+
+## Health Check
+
+The plugin exposes a `/linear-light/status` endpoint that reports configuration health. It works even without a valid access token.
+
+**Request:**
+
+```
+GET /linear-light/status
+```
+
+**Response (200):**
+
+```json
+{
+  "status": "ok" | "degraded",
+  "version": "0.1.0",
+  "configured": {
+    "webhook": true,
+    "oauth": true,
+    "token": true
+  },
+  "errors": [],
+  "warnings": []
+}
+```
+
+- `status: "ok"` — fully configured with a valid token
+- `status: "degraded"` — missing config or no token; check `errors` and `warnings`
+- `configured.webhook` — `webhookSecret` is set
+- `configured.oauth` — both `linearClientId` and `linearClientSecret` are set
+- `configured.token` — a Linear API token is available (OAuth or manual)
+
+## Troubleshooting
+
+### "no access token" at startup
+
+The plugin can't find a Linear API token. Visit `/linear-light/oauth/init` to start the OAuth flow, or set `accessToken` in plugin config.
+
+### "Missing webhookSecret" in status
+
+Find your webhook signing secret in **Linear → Settings → API → OAuth Applications → [your app] → Webhook Signing Secret** and set it in your config.
+
+### OAuth callback shows an error
+
+- Verify `linearClientId` and `linearClientSecret` match your Linear OAuth app
+- Check that the redirect URL is `https://<your-gateway-host>/linear-light/oauth/callback`
+- Ensure your gateway is reachable from the internet
+
+### Webhook returns 401
+
+The webhook signature verification failed. Check that `webhookSecret` matches the signing secret from your Linear OAuth app settings.
+
+### Status shows `degraded` but token exists
+
+If `configured.token` is `true` but status is still `degraded`, check `errors` — likely `webhookSecret` is missing.
 
 ## Token Management
 
@@ -148,6 +202,7 @@ openclaw-linear-light/
 ├── index.ts                  # Plugin entry — channel registration, tools, lifecycle hooks
 ├── openclaw.plugin.json      # Plugin manifest & config schema
 ├── src/
+│   ├── config-validation.ts  # Config validation with actionable error messages
 │   ├── webhook-handler.ts    # Webhook receiving, signature verification, dispatch
 │   ├── oauth-handler.ts      # OAuth PKCE flow (init + callback)
 │   ├── activity-stream.ts    # Real-time activity streaming to Linear agent sessions
