@@ -92,9 +92,13 @@ export default function register(api: OpenClawPluginApi) {
   }
 
   // Register lifecycle hooks for real-time activity streaming
+  // @ts-expect-error — hook signatures vary across openclaw versions
   api.on("llm_output", onLlmOutput)
+  // @ts-expect-error — hook signatures vary across openclaw versions
   api.on("before_tool_call", onBeforeToolCall)
+  // @ts-expect-error — hook signatures vary across openclaw versions
   api.on("after_tool_call", onAfterToolCall)
+  // @ts-expect-error — hook signatures vary across openclaw versions
   api.on("agent_end", onAgentEnd)
 
   api.logger.info("Linear Light: ready (channel mode)")
@@ -192,6 +196,7 @@ async function resolveIssueId(linearApi: LinearAgentApi, idOrIdentifier: string)
 
   // Try to find by identifier (e.g. "DEV-134")
   try {
+    // @ts-expect-error — gql is untyped in CI's openclaw version
     const data = await (linearApi as any).gql<{
       issue: { id: string } | null
     }>(
@@ -280,7 +285,8 @@ function createLinearTools(api: OpenClawPluginApi): any[] {
       },
       execute: async (_tc: string, { query, limit = 10 }: { query: string; limit?: number }) => {
         try {
-          const data = await (linearApi as any).gql<{
+          // @ts-expect-error — gql is untyped in CI's openclaw version
+    const data = await (linearApi as any).gql<{
             issueSearch: { nodes: Array<{ id: string; identifier: string; title: string; state: { name: string }; url: string }> }
           }>(
             `query SearchIssues($query: String!, $limit: Int) {

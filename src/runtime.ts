@@ -5,6 +5,7 @@
  * so webhook handler and activity stream can access them.
  */
 
+// @ts-expect-error — exported from local plugin-sdk but may not be in CI's version
 import { createPluginRuntimeStore } from "openclaw/plugin-sdk"
 import type { PluginRuntime } from "openclaw/plugin-sdk"
 import type { LinearAgentApi } from "./api/linear-api.js"

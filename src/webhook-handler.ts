@@ -9,6 +9,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto"
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk"
 import {
+  // @ts-expect-error — exported from local plugin-sdk but may not be in CI's version
   dispatchInboundReplyWithBase,
   type OpenClawConfig,
 } from "openclaw/plugin-sdk"
@@ -355,8 +356,8 @@ async function dispatchToAgent(
       },
     },
     deliver,
-    onRecordError: (err) => api.logger.error(`Linear Light: record inbound error: ${String(err)}`),
-    onDispatchError: (err, info) => api.logger.error(`Linear Light: dispatch error [${info.kind}]: ${String(err)}`),
+    onRecordError: (err: unknown) => api.logger.error(`Linear Light: record inbound error: ${String(err)}`),
+    onDispatchError: (err: unknown, info: { kind: string }) => api.logger.error(`Linear Light: dispatch error [${info.kind}]: ${String(err)}`),
   })
 
   api.logger.info(`Linear Light: dispatched agent for ${issue.identifier} (channel mode)`)

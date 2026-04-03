@@ -11,8 +11,11 @@
  * - error: Errors during execution (permanent)
  */
 
-import type { PluginHookAgentContext } from "openclaw/plugin-sdk"
-import { agentSessionMap, getLinearApi } from "./runtime.js"
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type HookContext = any
+
+import { getLinearApi } from "./runtime.js"
+import { agentSessionMap } from "../index.js"
 
 // ---------------------------------------------------------------------------
 // Debounce state per session
@@ -117,7 +120,7 @@ function resolveAgentSessionId(sessionKey: string): string | null {
  */
 export async function onLlmOutput(
   event: { assistantTexts: string[]; runId: string; sessionId: string },
-  ctx: PluginHookAgentContext,
+  ctx: HookContext,
 ): Promise<void> {
   const sessionKey = ctx.sessionKey
   if (!sessionKey?.startsWith("linear:")) return
@@ -154,7 +157,7 @@ export async function onLlmOutput(
  */
 export function onBeforeToolCall(
   event: { toolName: string; input: unknown },
-  ctx: PluginHookAgentContext,
+  ctx: HookContext,
 ): void {
   const sessionKey = ctx.sessionKey
   if (!sessionKey?.startsWith("linear:")) return
@@ -176,7 +179,7 @@ export function onBeforeToolCall(
  */
 export function onAfterToolCall(
   event: { toolName: string; output: unknown },
-  ctx: PluginHookAgentContext,
+  ctx: HookContext,
 ): void {
   const sessionKey = ctx.sessionKey
   if (!sessionKey?.startsWith("linear:")) return
@@ -199,7 +202,7 @@ export function onAfterToolCall(
  */
 export async function onAgentEnd(
   event: { success: boolean; error?: string; messages: unknown[] },
-  ctx: PluginHookAgentContext,
+  ctx: HookContext,
 ): Promise<void> {
   const sessionKey = ctx.sessionKey
   if (!sessionKey?.startsWith("linear:")) return
