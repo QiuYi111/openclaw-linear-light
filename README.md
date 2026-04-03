@@ -4,7 +4,51 @@ A channel-mode plugin for [OpenClaw](https://github.com/ceedaragents/openclaw) t
 
 Zero runtime dependencies. Built entirely on Node.js built-ins.
 
-## Overview
+## One Prompt Setup
+
+Copy this prompt and paste it to your coding agent (Claude Code, Cursor, etc.):
+
+````
+Install and configure the openclaw-linear-light plugin for my OpenClaw gateway.
+
+My setup:
+- Gateway host: <your-gateway-host>
+- Linear workspace: <your-workspace-name>
+
+Steps:
+1. Clone https://github.com/QiuYi111/openclaw-linear-light
+2. Install the plugin: `openclaw plugins install ./openclaw-linear-light`
+3. Help me create a Linear OAuth app (Settings → API → OAuth Applications → Create new):
+   - Redirect URL: `https://<your-gateway-host>/linear-light/oauth/callback`
+   - Webhook URL: `https://<your-gateway-host>/linear-light/webhook`
+   - Enable webhooks for Agent session events and Issues
+4. Add the Client ID, Client Secret, and Webhook Signing Secret to `openclaw.config.json5`:
+   ```json5
+   {
+     plugins: {
+       entries: {
+         "linear-light": {
+           config: {
+             enabled: true,
+             webhookSecret: "<webhook signing secret>",
+             mentionTrigger: "Linus",
+             autoInProgress: true,
+             linearClientId: "<OAuth client ID>",
+             linearClientSecret: "<OAuth client secret>",
+           }
+         }
+       }
+     }
+   }
+   ```
+5. Restart the gateway: `openclaw gateway restart`
+6. Visit `https://<your-gateway-host>/linear-light/oauth/init` to authorize
+7. Verify: `GET https://<your-gateway-host>/linear-light/status` should return `"status": "ok"`
+````
+
+Replace the `<your-*>` placeholders with your actual values. The agent will handle the rest.
+
+## How It Works
 
 Linear is registered as a first-class OpenClaw channel. When a user triggers the agent on a Linear issue (via @mention or agent session), the plugin:
 
@@ -31,6 +75,24 @@ Linear @mention / agent session
               └── final reply → createComment() → Linear issue thread
 ```
 
+## Skill System
+
+The plugin ships a built-in [Claude Code skill](.claude/skills/linear-light-setup/SKILL.md) (`linear-light-setup`) that guides agents through the entire configuration flow:
+
+- Validates prerequisites (gateway, tunnel, Linear admin access)
+- Walks through OAuth app creation step by step
+- Generates config and writes it to `openclaw.config.json5`
+- Handles OAuth authorization and token verification
+- Diagnoses common issues from health check responses
+
+If your agent supports Claude Code skills, just say:
+
+```
+/linear-light-setup
+```
+
+The skill activates automatically and walks you through setup.
+
 ## Features
 
 - **Channel-mode architecture** — Linear is a native OpenClaw channel, not a standalone bot
@@ -50,70 +112,6 @@ Linear @mention / agent session
 | `linear_update_status` | Change issue status (e.g. "In Progress", "Done", "Canceled") |
 | `linear_get_issue` | Get full issue details including comments, labels, assignee, project |
 | `linear_search_issues` | Search issues by query |
-
-## Prerequisites
-
-- [OpenClaw](https://github.com/ceedaragents/openclaw) gateway running and accessible
-- A public URL pointing to your gateway (Cloudflare Tunnel, ngrok, etc.)
-- A Linear workspace with admin access
-
-## Quick Start
-
-### 1. Create a Linear OAuth App
-
-Go to **Linear → Settings → API → OAuth Applications → Create new**:
-
-| Field | Value |
-|-------|-------|
-| Name | Your agent name |
-| Redirect URL | `https://<your-gateway-host>/linear-light/oauth/callback` |
-| Webhook URL | `https://<your-gateway-host>/linear-light/webhook` |
-| Webhook | Enabled |
-| Event types | Agent session events, Issues |
-
-After creating, note the **Client ID**, **Client Secret**, and **Webhook Signing Secret**.
-
-### 2. Install the Plugin
-
-```bash
-openclaw plugins install ./openclaw-linear-light
-openclaw gateway restart
-```
-
-### 3. Configure
-
-Add to your OpenClaw config (`openclaw.config.json5`):
-
-```json5
-{
-  plugins: {
-    entries: {
-      "linear-light": {
-        config: {
-          enabled: true,
-          webhookSecret: "<your webhook signing secret>",
-          mentionTrigger: "Linus",
-          autoInProgress: true,
-          linearClientId: "<your OAuth client ID>",
-          linearClientSecret: "<your OAuth client secret>",
-        }
-      }
-    }
-  }
-}
-```
-
-### 4. Authorize
-
-Visit `https://<your-gateway-host>/linear-light/oauth/init` to start the OAuth flow. After authorization, the token is stored automatically and refreshed as needed.
-
-### 5. Expose Your Gateway
-
-Use a tunnel to make your gateway reachable from Linear:
-
-```bash
-cloudflared tunnel --url http://localhost:18789
-```
 
 ## Configuration Reference
 
@@ -144,7 +142,7 @@ GET /linear-light/status
 
 ```json
 {
-  "status": "ok" | "degraded",
+  "status": "ok",
   "version": "0.1.0",
   "configured": {
     "webhook": true,
@@ -158,15 +156,12 @@ GET /linear-light/status
 
 - `status: "ok"` — fully configured with a valid token
 - `status: "degraded"` — missing config or no token; check `errors` and `warnings`
-- `configured.webhook` — `webhookSecret` is set
-- `configured.oauth` — both `linearClientId` and `linearClientSecret` are set
-- `configured.token` — a Linear API token is available (OAuth or manual)
 
 ## Troubleshooting
 
 ### "no access token" at startup
 
-The plugin can't find a Linear API token. Visit `/linear-light/oauth/init` to start the OAuth flow, or set `accessToken` in plugin config.
+Visit `/linear-light/oauth/init` to start the OAuth flow, or set `accessToken` in plugin config.
 
 ### "Missing webhookSecret" in status
 
@@ -181,10 +176,6 @@ Find your webhook signing secret in **Linear → Settings → API → OAuth Appl
 ### Webhook returns 401
 
 The webhook signature verification failed. Check that `webhookSecret` matches the signing secret from your Linear OAuth app settings.
-
-### Status shows `degraded` but token exists
-
-If `configured.token` is `true` but status is still `degraded`, check `errors` — likely `webhookSecret` is missing.
 
 ## Token Management
 
@@ -201,6 +192,7 @@ OAuth tokens are automatically refreshed before expiry and persisted back to dis
 openclaw-linear-light/
 ├── index.ts                  # Plugin entry — channel registration, tools, lifecycle hooks
 ├── openclaw.plugin.json      # Plugin manifest & config schema
+├── .claude/skills/           # Claude Code skills for agent-assisted setup
 ├── src/
 │   ├── config-validation.ts  # Config validation with actionable error messages
 │   ├── webhook-handler.ts    # Webhook receiving, signature verification, dispatch
