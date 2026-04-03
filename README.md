@@ -1,44 +1,88 @@
-# openclaw-linear-light
+# Linear Light
 
-Lightweight Linear integration for OpenClaw — turn Linear issues into task sessions with status management.
+A channel-mode plugin for [OpenClaw](https://github.com/ceedaragents/openclaw) that turns every Linear issue into an interactive AI agent session.
 
-## What it does
+Zero runtime dependencies. Built entirely on Node.js built-ins.
 
-- **@mention triggers** — When you @mention the agent in a Linear comment, it starts an agent session
-- **Session continuity** — Follow-up comments in the same issue thread continue the conversation
-- **Status management** — Automatically sets issues to "In Progress" when work starts
-- **Completion notifications** — Sends a notification (Telegram) when the agent finishes, for review
-- **Agent tools** — The agent gets `linear_comment`, `linear_update_status`, `linear_get_issue` tools
+## Overview
 
-## Architecture
+Linear is registered as a first-class OpenClaw channel. When a user triggers the agent on a Linear issue (via @mention or agent session), the plugin:
+
+1. Receives the webhook event from Linear (HMAC-SHA256 verified, deduped)
+2. Dispatches the message to the OpenClaw agent via the channel system
+3. Streams agent activity (thoughts, tool calls, responses) to Linear's agent session UI in real time
+4. Posts the agent's final reply as a comment on the issue
+
+Each issue maps to one persistent session, so follow-up comments continue the conversation naturally.
 
 ```
-Linear @mention → Gateway /linear-light/webhook
-                        │
-                        ▼
-              Filter + dedup
-                        │
-                        ▼
-         sessionKey = "linear:{issueId}"
-              → OpenClaw agent session
-                        │
-              ├─ Start → In Progress
-              ├─ Done → Telegram notification
-              └─ Reply → linear_comment()
+Linear @mention / agent session
+              │
+              ▼
+     Webhook (signed, deduped)
+              │
+              ▼
+  dispatchInboundReplyWithBase()
+              │
+              ▼
+     OpenClaw agent session
+              │
+              ├── thought / action → emitActivity() → Linear Agent Session UI
+              └── final reply → createComment() → Linear issue thread
 ```
 
-## Setup
+## Features
 
-### 1. Install as OpenClaw plugin
+- **Channel-mode architecture** — Linear is a native OpenClaw channel, not a standalone bot
+- **Agent session support** — Integrates with Linear's built-in agent session framework
+- **Comment fallback** — Also supports @mention triggers via regular comments
+- **Session continuity** — Each issue = one session; follow-up comments pick up where you left off
+- **Real-time activity streaming** — Thoughts, tool calls, and progress appear in Linear's agent session UI
+- **Auto status management** — Issues automatically move to "In Progress" when the agent starts working
+- **Built-in tools** — The agent can update issue status, query issue details, and search across issues
+- **OAuth with PKCE** — Secure token flow with automatic refresh
+- **Zero runtime dependencies** — Only uses Node.js built-ins
+
+## Agent Tools
+
+| Tool | Description |
+|------|-------------|
+| `linear_update_status` | Change issue status (e.g. "In Progress", "Done", "Canceled") |
+| `linear_get_issue` | Get full issue details including comments, labels, assignee, project |
+| `linear_search_issues` | Search issues by query |
+
+## Prerequisites
+
+- [OpenClaw](https://github.com/ceedaragents/openclaw) gateway running and accessible
+- A public URL pointing to your gateway (Cloudflare Tunnel, ngrok, etc.)
+- A Linear workspace with admin access
+
+## Quick Start
+
+### 1. Create a Linear OAuth App
+
+Go to **Linear → Settings → API → OAuth Applications → Create new**:
+
+| Field | Value |
+|-------|-------|
+| Name | Your agent name |
+| Redirect URL | `https://<your-gateway-host>/linear-light/oauth/callback` |
+| Webhook URL | `https://<your-gateway-host>/linear-light/webhook` |
+| Webhook | Enabled |
+| Event types | Agent session events, Issues |
+
+After creating, note the **Client ID**, **Client Secret**, and **Webhook Signing Secret**.
+
+### 2. Install the Plugin
 
 ```bash
 openclaw plugins install ./openclaw-linear-light
 openclaw gateway restart
 ```
 
-### 2. Configure
+### 3. Configure
 
-Add to your OpenClaw config:
+Add to your OpenClaw config (`openclaw.config.json5`):
 
 ```json5
 {
@@ -47,12 +91,11 @@ Add to your OpenClaw config:
       "linear-light": {
         config: {
           enabled: true,
-          webhookSecret: "${LINEAR_WEBHOOK_SECRET}",
-          mentionTrigger: "Linus",  // or whatever your agent is called
+          webhookSecret: "<your webhook signing secret>",
+          mentionTrigger: "Linus",
           autoInProgress: true,
-          notifyOnComplete: true,
-          notificationChannel: "telegram",
-          notificationTarget: "8569595684",
+          linearClientId: "<your OAuth client ID>",
+          linearClientSecret: "<your OAuth client secret>",
         }
       }
     }
@@ -60,37 +103,73 @@ Add to your OpenClaw config:
 }
 ```
 
-### 3. Linear OAuth App
+### 4. Authorize
 
-1. Go to Linear → Settings → API → OAuth Applications → Create new
-2. Fill in:
-   - **Name**: Your agent name
-   - **Redirect URL**: `https://<your-tunnel>/linear/oauth/callback`
-   - **Webhook URL**: `https://<your-tunnel>/linear-light/webhook`
-   - **Webhook**: ✓ enabled
-   - **Event types**: ✓ Agent session events, ✓ Issues
-3. Set `LINEAR_WEBHOOK_SECRET` to the webhook signing secret
+Visit `https://<your-gateway-host>/linear-light/oauth/init` to start the OAuth flow. After authorization, the token is stored automatically and refreshed as needed.
 
-### 4. Public endpoint
+### 5. Expose Your Gateway
 
-Use Cloudflare Tunnel or ngrok to expose your gateway:
+Use a tunnel to make your gateway reachable from Linear:
 
 ```bash
 cloudflared tunnel --url http://localhost:18789
 ```
 
-## Token resolution
+## Configuration Reference
 
-The plugin resolves Linear API tokens in order:
-1. Plugin config `accessToken`
-2. Cyrus config (`~/.cyrus/config.json`) — reuses existing OAuth tokens
-3. `LINEAR_ACCESS_TOKEN` env var
+All options are optional except where noted.
 
-## Credits
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enabled` | `boolean` | `true` | Disable the plugin entirely |
+| `webhookSecret` | `string` | — | **Required.** Linear webhook signing secret |
+| `mentionTrigger` | `string` | `"Linus"` | Text that triggers the agent in comments |
+| `autoInProgress` | `boolean` | `true` | Auto-set issue to "In Progress" when agent starts |
+| `notifyOnComplete` | `boolean` | `true` | Send notification when agent finishes |
+| `notificationChannel` | `string` | `"telegram"` | Channel for completion notifications |
+| `notificationTarget` | `string` | — | Target chat/user ID for notifications |
+| `linearClientId` | `string` | — | **Required for OAuth.** Linear OAuth client ID |
+| `linearClientSecret` | `string` | — | **Required for OAuth.** Linear OAuth client secret |
+| `sessionPrefix` | `string` | `"linear:"` | Prefix for session keys |
 
-Infrastructure borrowed from:
-- [openclaw-linear-plugin](https://github.com/calltelemetry/openclaw-linear-plugin) — webhook handling, Linear GraphQL API, dedup
-- [cyrus](https://github.com/ceedaragents/cyrus) — webhook verification, message translation patterns
+## Token Management
+
+The plugin resolves Linear API tokens in this order:
+
+1. **Plugin-local OAuth token** — `~/.openclaw/plugins/linear-light/token.json` (auto-created after OAuth)
+2. **Plugin config** — `accessToken` field in plugin config (for manual setup)
+
+OAuth tokens are automatically refreshed before expiry and persisted back to disk.
+
+## Project Structure
+
+```
+openclaw-linear-light/
+├── index.ts                  # Plugin entry — channel registration, tools, lifecycle hooks
+├── openclaw.plugin.json      # Plugin manifest & config schema
+├── src/
+│   ├── webhook-handler.ts    # Webhook receiving, signature verification, dispatch
+│   ├── oauth-handler.ts      # OAuth PKCE flow (init + callback)
+│   ├── activity-stream.ts    # Real-time activity streaming to Linear agent sessions
+│   ├── runtime.ts            # Shared runtime store (PluginRuntime, LinearAgentApi)
+│   ├── utils.ts              # Shared utility functions
+│   └── api/
+│       ├── linear-api.ts     # Linear GraphQL client with token refresh
+│       ├── oauth-store.ts    # OAuth token persistence (atomic write)
+│       └── oauth-state-store.ts  # PKCE state persistence
+└── src/__test__/             # Vitest test suite
+```
+
+## Development
+
+```bash
+npm install            # install dev dependencies
+npm run lint           # biome check
+npm run typecheck      # tsc --noEmit
+npm run test           # vitest
+npm run test:coverage  # vitest with coverage (threshold: 90%)
+npm run check          # lint + typecheck + test
+```
 
 ## License
 
