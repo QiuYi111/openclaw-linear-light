@@ -26,7 +26,7 @@
     }
   },
   "files": {
-    "includes": ["src/**/*.ts", "index.ts"]
+    "includes": ["src/api/**/*.ts", "src/config-validation.ts", "src/oauth-handler.ts", "src/runtime.ts", "src/utils.ts", "src/activity-stream.ts", "src/webhook-handler.ts", "index.ts"]
   },
   "vcs": {
     "enabled": true,
