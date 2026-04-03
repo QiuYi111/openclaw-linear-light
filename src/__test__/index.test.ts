@@ -706,9 +706,7 @@ describe("health endpoint /linear-light/status", () => {
 
     mod.default(api)
 
-    const statusRoute = api.registerHttpRoute.mock.calls.find(
-      (call: any) => call[0].path === "/linear-light/status",
-    )
+    const statusRoute = api.registerHttpRoute.mock.calls.find((call: any) => call[0].path === "/linear-light/status")
     expect(statusRoute).toBeDefined()
 
     const res = { writeHead: vi.fn(), end: vi.fn() }
@@ -730,9 +728,7 @@ describe("health endpoint /linear-light/status", () => {
 
     mod.default(api)
 
-    const statusRoute = api.registerHttpRoute.mock.calls.find(
-      (call: any) => call[0].path === "/linear-light/status",
-    )
+    const statusRoute = api.registerHttpRoute.mock.calls.find((call: any) => call[0].path === "/linear-light/status")
 
     const res = { writeHead: vi.fn(), end: vi.fn() }
     await statusRoute[0].handler({}, res)
