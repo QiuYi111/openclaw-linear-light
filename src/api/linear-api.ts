@@ -263,11 +263,10 @@ export class LinearAgentApi {
     return payload.data as T
   }
 
-  async emitActivity(agentSessionId: string, content: ActivityContent, idempotencyKey?: string): Promise<void> {
+  async emitActivity(agentSessionId: string, content: ActivityContent): Promise<void> {
     const input: Record<string, unknown> = {
       agentSessionId,
       content,
-      idempotencyKey: idempotencyKey || `${agentSessionId}-${Date.now()}`,
     }
     await this.gql(
       `mutation AgentActivityCreate($input: AgentActivityCreateInput!) {

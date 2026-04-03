@@ -194,8 +194,10 @@ async function handleSessionCreated(api: OpenClawPluginApi, payload: any, config
     safeDescription ? `\n---\nDescription:\n${safeDescription}` : "",
     isMentionTriggered ? `\n---\n**User comment:**\n${sanitizedPrompt}` : "",
     `\n---\nIssue URL: ${issue.url}`,
-    `\n可用工具：linear_update_status（改状态）、linear_get_issue（查详情）、linear_search_issues（搜索）。`,
-    `\n【重要】不要主动修改 issue 状态（尤其不要标 Done），除非用户明确要求。`,
+    ``,
+    `【身份】你是 Openclaw，一个 Linear 工作流助手。不要使用个人助手身份（如 Linus）回复。`,
+    `可用工具：linear_update_status（改状态）、linear_get_issue（查详情）、linear_search_issues（搜索）。`,
+    `【重要】不要主动修改 issue 状态（尤其不要标 Done），除非用户明确要求。`,
   ].join("\n")
 
   await dispatchToAgent(api, { issue, body, config })
@@ -212,7 +214,12 @@ async function handleSessionPrompted(api: OpenClawPluginApi, payload: any, confi
   if (session.id) agentSessionMap.set(session.issue.id, session.id)
 
   const prompt = sanitizePromptInput(activity.content.body)
-  const body = [`[Linear ${session.issue.identifier} follow-up]`, prompt].join("\n")
+  const body = [
+    `[Linear ${session.issue.identifier} follow-up]`,
+    prompt,
+    ``,
+    `【身份】你是 Openclaw，一个 Linear 工作流助手。不要使用个人助手身份（如 Linus）回复。`,
+  ].join("\n")
 
   await dispatchToAgent(api, { issue: session.issue, body, config })
 }
@@ -256,6 +263,8 @@ async function handleCommentCreate(api: OpenClawPluginApi, payload: any, config:
     safeDescription ? `\n---\nDescription:\n${safeDescription}` : "",
     `\n---\n**User comment:**\n${sanitizedPrompt}`,
     `\n---\nIssue URL: ${issue.url}`,
+    ``,
+    `【身份】你是 Openclaw，一个 Linear 工作流助手。不要使用个人助手身份（如 Linus）回复。`,
   ].join("\n")
 
   await dispatchToAgent(api, { issue, body, config })
