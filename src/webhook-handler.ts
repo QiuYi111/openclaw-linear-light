@@ -14,6 +14,7 @@ import {
   type OpenClawConfig,
 } from "openclaw/plugin-sdk"
 import { agentSessionMap, identifierSessionMap } from "../index.js"
+import type { Logger } from "./api/linear-api.js"
 import { LinearAgentApi, resolveLinearToken } from "./api/linear-api.js"
 import { setCompletionLoopConfig, startCompletionLoop } from "./completion-loop.js"
 import { getLinearRuntime, setLinearApi } from "./runtime.js"
@@ -459,6 +460,7 @@ function makeLinearApi(config: Record<string, unknown> | undefined, api: OpenCla
 
 let _lastApi: OpenClawPluginApi | null = null
 let _lastConfig: Record<string, unknown> | undefined
+let _logger: Logger = console as unknown as Logger
 
 /**
  * Store the last used api/config for completion loop dispatch.
@@ -467,6 +469,7 @@ let _lastConfig: Record<string, unknown> | undefined
 function captureDispatchContext(api: OpenClawPluginApi, config: Record<string, unknown> | undefined): void {
   _lastApi = api
   _lastConfig = config
+  _logger = api.logger as unknown as Logger
 }
 
 /**
@@ -479,7 +482,7 @@ export async function dispatchCompletionPrompt(
   prompt: string,
 ): Promise<void> {
   if (!_lastApi) {
-    console.warn(`[Linear Light] dispatchCompletionPrompt: no API context captured yet, skipping ${issueIdentifier}`)
+    _logger.warn(`[Linear Light] dispatchCompletionPrompt: no API context captured yet, skipping ${issueIdentifier}`)
     return
   }
 

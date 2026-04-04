@@ -11,8 +11,20 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import { homedir } from "node:os"
 import { join } from "node:path"
 
+import type { Logger } from "./linear-api.js"
+
 const TOKEN_DIR = join(homedir(), ".openclaw", "plugins", "linear-light")
 const STATE_PATH = join(TOKEN_DIR, "oauth-states.json")
+
+// ---------------------------------------------------------------------------
+// Logger injection
+// ---------------------------------------------------------------------------
+
+let _logger: Logger = console as unknown as Logger
+
+export function setOauthStateStoreLogger(logger: Logger): void {
+  _logger = logger
+}
 
 export interface PendingState {
   codeVerifier: string
@@ -88,6 +100,6 @@ function writeStateFileSync(states: StateMap): void {
     writeFileSync(tmpPath, JSON.stringify(states, null, 2), { encoding: "utf8", mode: 0o600 })
     renameSync(tmpPath, STATE_PATH)
   } catch (err) {
-    console.error(`Linear Light: failed to write oauth state store: ${err}`)
+    _logger.error(`Linear Light: failed to write oauth state store: ${err}`)
   }
 }
