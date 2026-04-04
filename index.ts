@@ -143,10 +143,12 @@ export default function register(api: OpenClawPluginApi) {
 // Channel Plugin definition
 // ---------------------------------------------------------------------------
 
-// @ts-expect-error — "linear" is a custom channel, not in built-in ChatChannelId list
 const meta = {
   id: "linear" as const,
   label: "Linear",
+  selectionLabel: "Linear Project Management",
+  docsPath: "https://github.com/QiuYi111/openclaw-linear-light",
+  blurb: "Manage Linear issues via OpenClaw agent",
   icon: null,
 }
 
