@@ -29,19 +29,6 @@ vi.mock("openclaw/plugin-sdk", () => ({
   })),
 }))
 
-// Mock openclaw/plugin-sdk/core for getChatChannelMeta (imported by index.ts)
-vi.mock("openclaw/plugin-sdk/core", () => ({
-  getChatChannelMeta: vi.fn(() => ({
-    id: "linear",
-    label: "Linear",
-    icon: "linear",
-    description: "Linear project management",
-    category: "developer-tools",
-    features: [],
-    configSchema: [],
-  })),
-}))
-
 // Mock runtime store
 vi.mock("../runtime.js", () => ({
   getLinearRuntime: vi.fn(() => mockRuntime),

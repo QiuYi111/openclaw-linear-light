@@ -13,8 +13,6 @@
  */
 
 import type { ChannelPlugin, OpenClawPluginApi } from "openclaw/plugin-sdk"
-// getChatChannelMeta is exported from plugin-sdk/core
-import { getChatChannelMeta } from "openclaw/plugin-sdk/core"
 import { onAfterToolCall, onAgentEnd, onBeforeToolCall, onLlmOutput } from "./src/activity-stream.js"
 import { LinearAgentApi, resolveLinearToken } from "./src/api/linear-api.js"
 import { setCompletionLoopConfig, setCompletionLoopDispatcher } from "./src/completion-loop.js"
@@ -146,7 +144,11 @@ export default function register(api: OpenClawPluginApi) {
 // ---------------------------------------------------------------------------
 
 // @ts-expect-error — "linear" is a custom channel, not in built-in ChatChannelId list
-const meta = getChatChannelMeta("linear")
+const meta = {
+  id: "linear" as const,
+  label: "Linear",
+  icon: null,
+}
 
 const linearPlugin: ChannelPlugin = {
   id: "linear",
