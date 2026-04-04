@@ -1217,6 +1217,124 @@ describe("handleWebhook", () => {
 })
 
 // ---------------------------------------------------------------------------
+// dispatchCompletionPrompt tests — per-issue context isolation
+// ---------------------------------------------------------------------------
+
+describe("dispatchCompletionPrompt", () => {
+  const SECRET = "wh-secret-test-123"
+  let uid = 1
+
+  const mockLogger = {
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    debug: vi.fn(),
+  }
+
+  function makeApi(config: Record<string, unknown> = {}) {
+    return {
+      pluginConfig: {
+        enabled: true,
+        webhookSecret: SECRET,
+        mentionTrigger: "Linus",
+        autoInProgress: false,
+        ...config,
+      },
+      logger: mockLogger,
+      config: {},
+      runtime: mockRuntime,
+    } as any
+  }
+
+  function uniqueCreated(overrides?: Record<string, unknown>) {
+    const n = uid++
+    return makeAgentSessionCreated({
+      createdAt: `2026-04-01T12:00:${String(n).padStart(2, "0")}.000Z`,
+      agentSession: {
+        id: `sess-dc-${n}`,
+        issue: {
+          id: `issue-dc-${n}`,
+          identifier: `ENG-${n + 100}`,
+          title: `DC issue ${n}`,
+          description: `Description for DC issue ${n}`,
+          url: `https://linear.app/eng/issue/ENG-${n + 100}`,
+          team: { id: "team-001", key: "ENG", name: "Engineering" },
+        },
+      },
+      ...overrides,
+    })
+  }
+
+  function makeSignedReq(payload: Record<string, unknown>, secret: string) {
+    const body = JSON.stringify(payload)
+    const sig = signPayload(body, secret)
+    const chunks: Buffer[] = [Buffer.from(body)]
+
+    const req = {
+      headers: { "linear-signature": sig },
+      on: vi.fn((event: string, cb: (...args: any[]) => void) => {
+        if (event === "data") {
+          for (const chunk of chunks) cb(chunk)
+        }
+        if (event === "end") {
+          cb()
+        }
+      }),
+    }
+
+    const res = {
+      writeHead: vi.fn(),
+      end: vi.fn(),
+    }
+
+    return { req, res }
+  }
+
+  it("uses per-issue context when multiple issues are handled concurrently", async () => {
+    const { dispatchCompletionPrompt, handleWebhook } = await import("../webhook-handler.js")
+
+    const api1 = makeApi({ customMarker: "api-1" })
+    const api2 = makeApi({ customMarker: "api-2" })
+
+    // Handle webhook for issue 1
+    const payload1 = uniqueCreated()
+    const { req: req1, res: res1 } = makeSignedReq(payload1, SECRET)
+    await handleWebhook(api1, req1, res1)
+
+    // Handle webhook for issue 2 — would overwrite singleton in old code
+    const payload2 = uniqueCreated()
+    const { req: req2, res: res2 } = makeSignedReq(payload2, SECRET)
+    await handleWebhook(api2, req2, res2)
+
+    mockDispatchInboundReplyWithBase.mockClear()
+
+    // Dispatch completion prompt for issue 1 — should use api1's context
+    await dispatchCompletionPrompt(payload1.agentSession.issue.id, "ENG-999", "check status")
+
+    expect(mockDispatchInboundReplyWithBase).toHaveBeenCalledTimes(1)
+
+    // Dispatch completion prompt for issue 2 — should use api2's context
+    mockDispatchInboundReplyWithBase.mockClear()
+    await dispatchCompletionPrompt(payload2.agentSession.issue.id, "ENG-998", "check status")
+
+    expect(mockDispatchInboundReplyWithBase).toHaveBeenCalledTimes(1)
+  })
+
+  it("warns and skips when no context captured for an issue", async () => {
+    const { dispatchCompletionPrompt } = await import("../webhook-handler.js")
+
+    // _logger may have been replaced by a previous test's handleWebhook call,
+    // so spy on the mock logger's warn method if available, otherwise console.warn
+    const warnSpy = vi.fn()
+    mockLogger.warn.mockImplementation(warnSpy)
+
+    await dispatchCompletionPrompt("nonexistent-issue", "ENG-000", "check")
+
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("no API context captured for ENG-000"))
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Sanitization tests (imported from utils.ts)
 // ---------------------------------------------------------------------------
 

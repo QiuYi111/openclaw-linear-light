@@ -28,6 +28,18 @@
   "files": {
     "includes": ["src/**/*.ts", "index.ts"]
   },
+  "overrides": [
+    {
+      "includes": ["src/__test__/**/*.ts"],
+      "linter": {
+        "rules": {
+          "suspicious": {
+            "noExplicitAny": "off"
+          }
+        }
+      }
+    }
+  ],
   "vcs": {
     "enabled": true,
     "clientKind": "git",
