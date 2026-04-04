@@ -15,7 +15,12 @@
 import type { ChannelPlugin, OpenClawPluginApi } from "openclaw/plugin-sdk"
 import { onAfterToolCall, onAgentEnd, onBeforeToolCall, onLlmOutput } from "./src/activity-stream.js"
 import { LinearAgentApi, resolveLinearToken } from "./src/api/linear-api.js"
-import { setCompletionLoopConfig, setCompletionLoopDispatcher, setCompletionLoopLogger } from "./src/completion-loop.js"
+import {
+  resumePersistedLoops,
+  setCompletionLoopConfig,
+  setCompletionLoopDispatcher,
+  setCompletionLoopLogger,
+} from "./src/completion-loop.js"
 import { validateConfig } from "./src/config-validation.js"
 import { handleOAuthCallback, handleOAuthInit } from "./src/oauth-handler.js"
 import { setLinearApi, setLinearRuntime } from "./src/runtime.js"
@@ -136,6 +141,13 @@ export default function register(api: OpenClawPluginApi) {
   setCompletionLoopDispatcher((issueId, issueIdentifier, body) =>
     dispatchCompletionPrompt(issueId, issueIdentifier, body),
   )
+
+  // Resume persisted loops from previous session
+  resumePersistedLoops().then((count) => {
+    if (count > 0) {
+      api.logger.info(`Linear Light: resumed ${count} completion loop(s) from previous session`)
+    }
+  })
 
   api.logger.info("Linear Light: ready (channel mode)")
 }
