@@ -472,7 +472,10 @@ export async function dispatchCompletionPrompt(
   issueIdentifier: string,
   prompt: string,
 ): Promise<void> {
-  if (!_lastApi) return
+  if (!_lastApi) {
+    console.warn(`[Linear Light] dispatchCompletionPrompt: no API context captured yet, skipping ${issueIdentifier}`)
+    return
+  }
 
   const issue = { id: issueId, identifier: issueIdentifier, title: "", description: null, url: "" }
   const body = [`[Linear ${issueIdentifier} completion check]`, prompt, ``, getAgentIdentity(_lastConfig)].join("\n")
