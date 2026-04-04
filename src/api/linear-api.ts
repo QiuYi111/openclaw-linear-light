@@ -205,7 +205,7 @@ export class LinearAgentApi {
     return this.refreshToken ? `Bearer ${this.accessToken}` : this.accessToken
   }
 
-  private async gql<T = unknown>(query: string, variables?: Record<string, unknown>): Promise<T> {
+  async gql<T = unknown>(query: string, variables?: Record<string, unknown>): Promise<T> {
     await this.ensureValidToken()
 
     const res = await fetch(LINEAR_GRAPHQL_URL, {
@@ -309,7 +309,22 @@ export class LinearAgentApi {
     project: { id: string; name: string } | null
     url: string
   }> {
-    const data = await this.gql<{ issue: any }>(
+    const data = await this.gql<{
+      issue: {
+        id: string
+        identifier: string
+        title: string
+        description: string | null
+        state: { name: string; type: string }
+        creator: { name: string; email: string | null } | null
+        assignee: { name: string } | null
+        labels: { nodes: Array<{ id: string; name: string }> }
+        team: { id: string; key: string; name: string }
+        comments: { nodes: Array<{ id: string; body: string; user: { name: string } | null; createdAt: string }> }
+        project: { id: string; name: string } | null
+        url: string
+      } | null
+    }>(
       `query Issue($id: String!) {
         issue(id: $id) {
           id
@@ -335,6 +350,7 @@ export class LinearAgentApi {
       }`,
       { id: issueId },
     )
+    if (!data.issue) throw new Error(`Issue ${issueId} not found`)
     return data.issue
   }
 
