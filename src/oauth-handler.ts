@@ -11,6 +11,7 @@ import type { OpenClawPluginApi } from "openclaw/plugin-sdk"
 
 import { deletePendingState, getPendingState, savePendingState } from "./api/oauth-state-store.js"
 import { writeStoredToken } from "./api/oauth-store.js"
+import type { IncomingMessage, ServerResponse } from "./types.js"
 
 const LINEAR_AUTHORIZE_URL = "https://linear.app/oauth/authorize"
 const LINEAR_TOKEN_URL = "https://api.linear.app/oauth/token"
@@ -21,7 +22,7 @@ const STATE_TTL_MS = 600_000 // 10 minutes
 /**
  * Read query string from a stream-based request URL.
  */
-function getQueryParams(req: any): Record<string, string> {
+function getQueryParams(req: IncomingMessage): Record<string, string> {
   const url = req.url as string
   const qIndex = url.indexOf("?")
   if (qIndex === -1) return {}
@@ -85,7 +86,11 @@ export function generateAuthorizationURL(
  * Handle OAuth init — redirect the user to Linear's authorization page.
  * Route: GET /linear-light/oauth/init
  */
-export async function handleOAuthInit(api: OpenClawPluginApi, req: any, res: any): Promise<void> {
+export async function handleOAuthInit(
+  api: OpenClawPluginApi,
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
   const config = api.pluginConfig as Record<string, unknown> | undefined
   const clientId = (config?.linearClientId as string) || process.env.LINEAR_CLIENT_ID
 
@@ -111,7 +116,11 @@ export async function handleOAuthInit(api: OpenClawPluginApi, req: any, res: any
  * Handle OAuth callback — exchange authorization code for tokens.
  * Route: GET /linear-light/oauth/callback
  */
-export async function handleOAuthCallback(api: OpenClawPluginApi, req: any, res: any): Promise<void> {
+export async function handleOAuthCallback(
+  api: OpenClawPluginApi,
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
   const config = api.pluginConfig as Record<string, unknown> | undefined
   const params = getQueryParams(req)
 

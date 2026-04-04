@@ -12,7 +12,7 @@
  * - Additional tools for Linear operations (update status, search, etc.)
  */
 
-import type { ChannelPlugin, OpenClawPluginApi } from "openclaw/plugin-sdk"
+import type { AnyAgentTool, ChannelPlugin, OpenClawPluginApi } from "openclaw/plugin-sdk"
 import {
   onAfterToolCall,
   onAgentEnd,
@@ -279,8 +279,7 @@ async function resolveIssueId(linearApi: LinearAgentApi, idOrIdentifier: string)
 
   // Try to find by identifier (e.g. "DEV-134")
   try {
-    // @ts-expect-error — gql is untyped in CI's openclaw version
-    const data = await (linearApi as any).gql<{
+    const data = await linearApi.gql<{
       issue: { id: string } | null
     }>(
       `query IssueByIdentifier($identifier: String!) {
@@ -298,7 +297,7 @@ async function resolveIssueId(linearApi: LinearAgentApi, idOrIdentifier: string)
 // Tools — Linear operations
 // ---------------------------------------------------------------------------
 
-function createLinearTools(api: OpenClawPluginApi): any[] {
+function createLinearTools(api: OpenClawPluginApi): AnyAgentTool[] {
   const config = api.pluginConfig as Record<string, unknown> | undefined
   const tokenInfo = resolveLinearToken(config)
   if (!tokenInfo.accessToken) return []
@@ -361,8 +360,7 @@ function createLinearTools(api: OpenClawPluginApi): any[] {
       },
       execute: async (_tc: string, { query, limit = 10 }: { query: string; limit?: number }) => {
         try {
-          // @ts-expect-error — gql is untyped in CI's openclaw version
-          const data = await (linearApi as any).gql<{
+          const data = await linearApi.gql<{
             issueSearch: {
               nodes: Array<{ id: string; identifier: string; title: string; state: { name: string }; url: string }>
             }
@@ -374,9 +372,7 @@ function createLinearTools(api: OpenClawPluginApi): any[] {
             }`,
             { query, limit },
           )
-          const results = data.issueSearch.nodes.map(
-            (i: any) => `[${i.identifier}] ${i.title} (${i.state.name}) ${i.url}`,
-          )
+          const results = data.issueSearch.nodes.map((i) => `[${i.identifier}] ${i.title} (${i.state.name}) ${i.url}`)
           return {
             content: [{ type: "text", text: results.length ? results.join("\n") : "No issues found" }],
             details: {},

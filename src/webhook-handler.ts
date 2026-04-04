@@ -18,6 +18,14 @@ import type { LinearAgentApi, Logger } from "./api/linear-api.js"
 import { resolveLinearToken } from "./api/linear-api.js"
 import { setCompletionLoopConfig, startCompletionLoop } from "./completion-loop.js"
 import { getLinearApi, getLinearRuntime } from "./runtime.js"
+import type {
+  AgentSessionCreatedPayload,
+  AgentSessionPromptedPayload,
+  CommentCreatePayload,
+  IncomingMessage,
+  LinearWebhookPayload,
+  ServerResponse,
+} from "./types.js"
 import { sanitizePromptInput } from "./utils.js"
 
 const CHANNEL_ID = "linear" as const
@@ -67,9 +75,9 @@ function verifySignature(rawBody: Buffer, signature: string, secret: string): bo
 }
 
 async function readBody(
-  req: any,
+  req: IncomingMessage,
   maxBytes = 1_000_000,
-): Promise<{ ok: boolean; body?: any; rawBuffer?: Buffer; error?: string }> {
+): Promise<{ ok: boolean; body?: LinearWebhookPayload; rawBuffer?: Buffer; error?: string }> {
   return new Promise((resolve) => {
     const chunks: Buffer[] = []
     let total = 0
@@ -112,7 +120,7 @@ async function readBody(
   })
 }
 
-export async function handleWebhook(api: OpenClawPluginApi, req: any, res: any): Promise<void> {
+export async function handleWebhook(api: OpenClawPluginApi, req: IncomingMessage, res: ServerResponse): Promise<void> {
   const config = api.pluginConfig as Record<string, unknown> | undefined
   const secret = config?.webhookSecret as string | undefined
 
@@ -130,7 +138,7 @@ export async function handleWebhook(api: OpenClawPluginApi, req: any, res: any):
   }
 
   const { ok, body, rawBuffer, error } = await readBody(req)
-  if (!(ok && rawBuffer)) {
+  if (!(ok && body && rawBuffer)) {
     res.writeHead(400, { "Content-Type": "application/json" })
     res.end(JSON.stringify({ error: error || "bad request" }))
     return
@@ -166,19 +174,19 @@ export async function handleWebhook(api: OpenClawPluginApi, req: any, res: any):
 
 async function processWebhook(
   api: OpenClawPluginApi,
-  payload: any,
+  payload: LinearWebhookPayload,
   config: Record<string, unknown> | undefined,
 ): Promise<void> {
   const { type, action } = payload
 
   if (type === "AgentSessionEvent") {
-    if (action === "created") await handleSessionCreated(api, payload, config)
-    else if (action === "prompted") await handleSessionPrompted(api, payload, config)
+    if (action === "created") await handleSessionCreated(api, payload as AgentSessionCreatedPayload, config)
+    else if (action === "prompted") await handleSessionPrompted(api, payload as AgentSessionPromptedPayload, config)
     return
   }
 
   if (type === "Comment" && action === "create") {
-    await handleCommentCreate(api, payload, config)
+    await handleCommentCreate(api, payload as CommentCreatePayload, config)
     return
   }
 }
@@ -189,7 +197,7 @@ async function processWebhook(
 
 async function handleSessionCreated(
   api: OpenClawPluginApi,
-  payload: any,
+  payload: AgentSessionCreatedPayload,
   config: Record<string, unknown> | undefined,
 ): Promise<void> {
   const session = payload.agentSession
@@ -263,7 +271,7 @@ async function handleSessionCreated(
 
 async function handleSessionPrompted(
   api: OpenClawPluginApi,
-  payload: any,
+  payload: AgentSessionPromptedPayload,
   config: Record<string, unknown> | undefined,
 ): Promise<void> {
   const session = payload.agentSession
@@ -301,7 +309,7 @@ async function handleSessionPrompted(
 
 async function handleCommentCreate(
   api: OpenClawPluginApi,
-  payload: any,
+  payload: CommentCreatePayload,
   config: Record<string, unknown> | undefined,
 ): Promise<void> {
   const comment = payload.data
