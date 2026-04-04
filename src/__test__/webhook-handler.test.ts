@@ -384,25 +384,15 @@ describe("handleWebhook", () => {
             Promise.resolve({
               data: {
                 issue: {
-                  id: `issue-uid-${uid}`,
-                  identifier: `ENG-${uid + 100}`,
-                  team: { id: "team-001", key: "ENG", name: "Engineering" },
-                },
-              },
-            }),
-        })
-        .mockResolvedValueOnce({
-          ok: true,
-          json: () =>
-            Promise.resolve({
-              data: {
-                team: {
-                  states: {
-                    nodes: [
-                      { id: "s-todo", name: "Todo" },
-                      { id: "s-ip", name: "In Progress" },
-                      { id: "s-done", name: "Done" },
-                    ],
+                  team: {
+                    id: "team-001",
+                    states: {
+                      nodes: [
+                        { id: "s-todo", name: "Todo" },
+                        { id: "s-ip", name: "In Progress" },
+                        { id: "s-done", name: "Done" },
+                      ],
+                    },
                   },
                 },
               },
@@ -423,9 +413,9 @@ describe("handleWebhook", () => {
       await handleWebhook(api, req, res)
 
       expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
-      // 3 fetch calls for status update + 1 for emitActivity
-      expect(mockFetch).toHaveBeenCalledTimes(4)
-      const updateCall = mockFetch.mock.calls[2]
+      // 2 fetch calls for status update (combined query + update mutation) + 1 for emitActivity
+      expect(mockFetch).toHaveBeenCalledTimes(3)
+      const updateCall = mockFetch.mock.calls[1]
       const body = JSON.parse(updateCall[1].body)
       expect(body.variables.input.stateId).toBe("s-ip")
     })
@@ -1142,37 +1132,27 @@ describe("handleWebhook", () => {
               },
             }),
         })
-        // 2) getIssueDetails (updateIssueState internal)
+        // 2) updateIssueState combined query (issue team + states)
         .mockResolvedValueOnce({
           ok: true,
           json: () =>
             Promise.resolve({
               data: {
                 issue: {
-                  id: commentIssueId,
-                  team: { id: "team-001", key: "ENG", name: "Engineering" },
-                },
-              },
-            }),
-        })
-        // 3) getTeamStates
-        .mockResolvedValueOnce({
-          ok: true,
-          json: () =>
-            Promise.resolve({
-              data: {
-                team: {
-                  states: {
-                    nodes: [
-                      { id: "s-todo", name: "Todo" },
-                      { id: "s-ip", name: "In Progress" },
-                    ],
+                  team: {
+                    id: "team-001",
+                    states: {
+                      nodes: [
+                        { id: "s-todo", name: "Todo" },
+                        { id: "s-ip", name: "In Progress" },
+                      ],
+                    },
                   },
                 },
               },
             }),
         })
-        // 4) issueUpdate
+        // 3) issueUpdate
         .mockResolvedValueOnce({
           ok: true,
           json: () => Promise.resolve({ data: { issueUpdate: { success: true } } }),
@@ -1194,7 +1174,8 @@ describe("handleWebhook", () => {
 
       expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
       expect(mockDispatchInboundReplyWithBase).toHaveBeenCalled()
-      expect(mockFetch).toHaveBeenCalledTimes(4)
+      // 1 getIssueDetails + 1 combined query + 1 update mutation = 3
+      expect(mockFetch).toHaveBeenCalledTimes(3)
     })
   })
 

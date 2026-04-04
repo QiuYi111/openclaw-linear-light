@@ -21,6 +21,7 @@ const LINEAR_GRAPHQL_URL = "https://api.linear.app/graphql"
 const LINEAR_OAUTH_TOKEN_URL = "https://api.linear.app/oauth/token"
 const REFRESH_BUFFER_MS = 60_000 // refresh 60s before expiry
 const REFRESH_COOLDOWN_MS = 5_000 // coalesce late-arriving 401s for 5s
+const TEAM_STATES_TTL_MS = 5 * 60_000 // cache team states for 5 minutes
 
 export type ActivityContent =
   | { type: "thought"; body: string }
@@ -75,6 +76,8 @@ export class LinearAgentApi {
   private logger: Logger
   private refreshPromise: Promise<void> | null = null
   private refreshSuccessTime: number = 0
+  /** Cache: teamId → { states[], fetchedAt } */
+  private teamStatesCache = new Map<string, { nodes: Array<{ id: string; name: string }>; fetchedAt: number }>()
 
   constructor(
     accessToken: string,
@@ -336,31 +339,38 @@ export class LinearAgentApi {
   }
 
   async updateIssueState(issueId: string, stateName: string): Promise<boolean> {
-    // First, get the team to find the state ID
-    const issue = await this.getIssueDetails(issueId)
-    const teamId = issue.team?.id
-    if (!teamId) throw new Error(`Cannot find team for issue ${issueId}`)
-
-    const statesData = await this.gql<{
-      team: { states: { nodes: Array<{ id: string; name: string }> } }
+    // Fetch issue's team ID + team states in a single GraphQL query via nesting
+    const data = await this.gql<{
+      issue: {
+        team: { id: string; states: { nodes: Array<{ id: string; name: string }> } } | null
+      }
     }>(
-      `query TeamStates($id: String!) {
-        team(id: $id) {
-          states { nodes { id name } }
+      `query IssueTeamStates($id: String!) {
+        issue(id: $id) {
+          team {
+            id
+            states { nodes { id name } }
+          }
         }
       }`,
-      { id: teamId },
+      { id: issueId },
     )
 
-    const state = statesData.team.states.nodes.find((s: any) => s.name.toLowerCase() === stateName.toLowerCase())
+    const team = data.issue.team
+    if (!team) throw new Error(`Cannot find team for issue ${issueId}`)
+
+    // Update cache with freshly fetched states
+    this.teamStatesCache.set(team.id, { nodes: team.states.nodes, fetchedAt: Date.now() })
+
+    const state = team.states.nodes.find((s) => s.name.toLowerCase() === stateName.toLowerCase())
 
     if (!state) {
       throw new Error(
-        `State "${stateName}" not found in team ${teamId}. Available: ${statesData.team.states.nodes.map((s: any) => s.name).join(", ")}`,
+        `State "${stateName}" not found in team ${team.id}. Available: ${team.states.nodes.map((s) => s.name).join(", ")}`,
       )
     }
 
-    const data = await this.gql<{
+    const updateData = await this.gql<{
       issueUpdate: { success: boolean }
     }>(
       `mutation IssueUpdate($id: String!, $input: IssueUpdateInput!) {
@@ -369,7 +379,7 @@ export class LinearAgentApi {
       { id: issueId, input: { stateId: state.id } },
     )
 
-    return data.issueUpdate.success
+    return updateData.issueUpdate.success
   }
 
   async getTeams(): Promise<Array<{ id: string; name: string; key: string }>> {
