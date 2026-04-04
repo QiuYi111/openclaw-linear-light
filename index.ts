@@ -17,7 +17,12 @@ import type { ChannelPlugin, OpenClawPluginApi } from "openclaw/plugin-sdk"
 import { getChatChannelMeta } from "openclaw/plugin-sdk/core"
 import { onAfterToolCall, onAgentEnd, onBeforeToolCall, onLlmOutput } from "./src/activity-stream.js"
 import { LinearAgentApi, resolveLinearToken } from "./src/api/linear-api.js"
-import { setCompletionLoopConfig, setCompletionLoopDispatcher, setCompletionLoopLogger } from "./src/completion-loop.js"
+import {
+  resumePersistedLoops,
+  setCompletionLoopConfig,
+  setCompletionLoopDispatcher,
+  setCompletionLoopLogger,
+} from "./src/completion-loop.js"
 import { validateConfig } from "./src/config-validation.js"
 import { handleOAuthCallback, handleOAuthInit } from "./src/oauth-handler.js"
 import { setLinearApi, setLinearRuntime } from "./src/runtime.js"

@@ -13,6 +13,7 @@
  */
 
 import type { Logger } from "./api/linear-api.js"
+import { readPersistedLoops, writePersistedLoops } from "./api/loop-store.js"
 import { getLinearApi } from "./runtime.js"
 
 // ---------------------------------------------------------------------------
@@ -70,6 +71,38 @@ let _logger: Logger = console as unknown as Logger
 
 export function setCompletionLoopLogger(logger: Logger): void {
   _logger = logger
+}
+
+// ---------------------------------------------------------------------------
+// Persistence helpers
+// ---------------------------------------------------------------------------
+
+/** Sync the in-memory activeLoops map to disk. */
+function persistLoops(): void {
+  const persisted: Record<
+    string,
+    { issueId: string; issueIdentifier: string; sessionKey: string; iterations: number; startedAt: number }
+  > = {}
+  for (const [issueId, state] of activeLoops) {
+    persisted[issueId] = {
+      issueId: state.issueId,
+      issueIdentifier: state.issueIdentifier,
+      sessionKey: state.sessionKey,
+      iterations: state.iterations,
+      startedAt: Date.now(),
+    }
+  }
+  writePersistedLoops(persisted)
+}
+
+/**
+ * Remove a specific issue from the persisted store.
+ * Call this after stopping a loop (terminal state, cancel, max iterations).
+ */
+function removePersistedLoop(issueId: string): void {
+  const all = readPersistedLoops()
+  delete all[issueId]
+  writePersistedLoops(all)
 }
 
 // ---------------------------------------------------------------------------
@@ -208,6 +241,7 @@ export function stopCompletionLoop(issueId: string): void {
   if (loop) {
     clearTimeout(loop.timer)
     activeLoops.delete(issueId)
+    removePersistedLoop(issueId)
     _logger.info(`[Linear Light] completion loop stopped for ${loop.issueIdentifier}`)
   }
 }
@@ -253,14 +287,14 @@ export async function resumePersistedLoops(): Promise<number> {
 
   const config = getConfig()
   if (!config.enabled) {
-    console.info("[Linear Light] completion loop: persistence found but feature is disabled, clearing")
+    _logger.info("[Linear Light] completion loop: persistence found but feature is disabled, clearing")
     writePersistedLoops({})
     return 0
   }
 
   const api = getLinearApi()
   if (!api) {
-    console.warn("[Linear Light] completion loop: persistence found but no Linear API available, skipping resume")
+    _logger.warn("[Linear Light] completion loop: persistence found but no Linear API available, skipping resume")
     return 0
   }
 
@@ -272,7 +306,7 @@ export async function resumePersistedLoops(): Promise<number> {
       // Check if issue has reached terminal state during downtime
       const issue = await api.getIssueDetails(issueId)
       if (issue.state?.name && isTerminalState(issue.state.name)) {
-        console.info(
+        _logger.info(
           `[Linear Light] completion loop: skipping resume for ${loop.issueIdentifier} — already "${issue.state.name}"`,
         )
         continue
@@ -280,7 +314,7 @@ export async function resumePersistedLoops(): Promise<number> {
 
       // Check if max iterations exceeded
       if (config.maxIterations > 0 && loop.iterations >= config.maxIterations) {
-        console.info(
+        _logger.info(
           `[Linear Light] completion loop: skipping resume for ${loop.issueIdentifier} — already at max iterations`,
         )
         continue
@@ -297,9 +331,9 @@ export async function resumePersistedLoops(): Promise<number> {
       activeLoops.set(issueId, state)
       stillActive[issueId] = loop
       resumed++
-      console.info(`[Linear Light] completion loop: resumed for ${loop.issueIdentifier} (iteration ${loop.iterations})`)
+      _logger.info(`[Linear Light] completion loop: resumed for ${loop.issueIdentifier} (iteration ${loop.iterations})`)
     } catch (err) {
-      console.error(`[Linear Light] completion loop: failed to resume for ${loop.issueIdentifier}:`, err)
+      _logger.error(`[Linear Light] completion loop: failed to resume for ${loop.issueIdentifier}: ${err}`)
     }
   }
 

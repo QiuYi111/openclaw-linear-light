@@ -15,12 +15,34 @@ vi.mock("../runtime.js", () => ({
   getLinearApi: (...args: any[]) => mockGetLinearApi(...args),
 }))
 
+vi.mock("../../index.js", () => ({
+  agentSessionMap: new Map(),
+}))
+
+vi.mock("../api/loop-store.js", () => ({
+  readPersistedLoops: () => ({ ...mockPersistedLoops }),
+  writePersistedLoops: (loops: unknown) => {
+    writeCalls.push([loops])
+    mockPersistedLoops = { ...(loops as Record<string, unknown>) }
+  },
+}))
+
 async function importFresh() {
   vi.resetModules()
   mockPersistedLoops = {}
   writeCalls.length = 0
   vi.doMock("../runtime.js", () => ({
     getLinearApi: (...args: any[]) => mockGetLinearApi(...args),
+  }))
+  vi.doMock("../../index.js", () => ({
+    agentSessionMap: new Map(),
+  }))
+  vi.doMock("../api/loop-store.js", () => ({
+    readPersistedLoops: () => ({ ...mockPersistedLoops }),
+    writePersistedLoops: (loops: unknown) => {
+      writeCalls.push([loops])
+      mockPersistedLoops = { ...(loops as Record<string, unknown>) }
+    },
   }))
   return await import("../completion-loop.js")
 }
