@@ -11,17 +11,10 @@ vi.mock("../runtime.js", () => ({
   getLinearApi: (...args: any[]) => mockGetLinearApi(...args),
 }))
 
-vi.mock("../../index.js", () => ({
-  agentSessionMap: new Map(),
-}))
-
 async function importFresh() {
   vi.resetModules()
   vi.doMock("../runtime.js", () => ({
     getLinearApi: (...args: any[]) => mockGetLinearApi(...args),
-  }))
-  vi.doMock("../../index.js", () => ({
-    agentSessionMap: new Map(),
   }))
   return await import("../completion-loop.js")
 }
@@ -298,7 +291,8 @@ describe("completion-loop", () => {
       mod.setCompletionLoopConfig({ completionLoopInterval: 5 })
       mod.setCompletionLoopDispatcher(mockDispatchFn)
 
-      const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {})
+      const mockLogger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+      mod.setCompletionLoopLogger(mockLogger)
 
       const mockApi = {
         getIssueDetails: vi.fn().mockRejectedValue(new Error("network error")),
@@ -316,8 +310,7 @@ describe("completion-loop", () => {
 
       // Loop should still be active after error
       expect(mod.isCompletionLoopActive("issue-1")).toBe(true)
-      expect(consoleSpy).toHaveBeenCalled()
-      consoleSpy.mockRestore()
+      expect(mockLogger.error).toHaveBeenCalled()
       mod.stopAllCompletionLoops()
     })
 
@@ -327,7 +320,8 @@ describe("completion-loop", () => {
 
       mockGetLinearApi.mockReturnValue(null)
 
-      const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {})
+      const mockLogger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+      mod.setCompletionLoopLogger(mockLogger)
 
       mod.startCompletionLoop({
         issueId: "issue-1",
@@ -339,8 +333,7 @@ describe("completion-loop", () => {
       await vi.advanceTimersByTimeAsync(0)
 
       expect(mod.isCompletionLoopActive("issue-1")).toBe(false)
-      expect(consoleSpy).toHaveBeenCalled()
-      consoleSpy.mockRestore()
+      expect(mockLogger.error).toHaveBeenCalled()
     })
   })
 
