@@ -33,6 +33,7 @@ describe("activity-stream", () => {
     vi.doMock("../../index.js", () => ({
       agentSessionMap: new Map([["issue-uuid-001", "linear-session-123"]]),
       identifierSessionMap: new Map([["DEV-163", "linear-session-123"]]),
+      scheduleSessionCleanup: vi.fn(),
     }))
     return await import("../activity-stream.js")
   }

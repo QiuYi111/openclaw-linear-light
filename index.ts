@@ -38,10 +38,21 @@ import { dispatchCompletionPrompt, handleWebhook } from "./src/webhook-handler.j
 // ---------------------------------------------------------------------------
 // Maps issueId → Linear agent session ID (for emitActivity)
 // Maps issue identifier (e.g. "DEV-163") → Linear agent session ID (for activity stream hooks)
+// Entries are cleaned up after agent_end + a short grace period for late activity.
 // ---------------------------------------------------------------------------
+
+const SESSION_CLEANUP_DELAY_MS = 30_000
 
 export const agentSessionMap = new Map<string, string>()
 export const identifierSessionMap = new Map<string, string>()
+
+/** Schedule removal of session map entries after a grace period. */
+export function scheduleSessionCleanup(issueId: string, identifier: string): void {
+  setTimeout(() => {
+    agentSessionMap.delete(issueId)
+    identifierSessionMap.delete(identifier)
+  }, SESSION_CLEANUP_DELAY_MS)
+}
 
 // ---------------------------------------------------------------------------
 // Plugin registration
