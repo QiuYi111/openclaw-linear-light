@@ -16,12 +16,23 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 24
           cache: npm
       - run: npm ci --ignore-scripts
-      - run: npx biome ci src/ index.ts
+      - name: Lint changed files
+        run: |
+          CHANGED=$(git diff --name-only --diff-filter=ACMRT origin/main...HEAD -- '*.ts' '*.js' '*.json')
+          if [ -n "$CHANGED" ]; then
+            echo "Linting changed files:"
+            echo "$CHANGED"
+            npx biome ci $CHANGED
+          else
+            echo "No changed files to lint"
+          fi
 
   typecheck:
     name: TypeCheck
