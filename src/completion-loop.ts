@@ -10,7 +10,7 @@
  * - Max iterations reached (if configured)
  */
 
-import { agentSessionMap } from "../index.js"
+import type { Logger } from "./api/linear-api.js"
 import { getLinearApi } from "./runtime.js"
 
 // ---------------------------------------------------------------------------
@@ -61,6 +61,16 @@ export function setCompletionLoopDispatcher(
 }
 
 // ---------------------------------------------------------------------------
+// Logger injection
+// ---------------------------------------------------------------------------
+
+let _logger: Logger = console as unknown as Logger
+
+export function setCompletionLoopLogger(logger: Logger): void {
+  _logger = logger
+}
+
+// ---------------------------------------------------------------------------
 // Core loop logic
 // ---------------------------------------------------------------------------
 
@@ -69,7 +79,7 @@ async function tick(state: LoopState): Promise<void> {
 
   const api = getLinearApi()
   if (!api) {
-    console.error("[Linear Light] completion loop: no Linear API available, stopping")
+    _logger.error("[Linear Light] completion loop: no Linear API available, stopping")
     activeLoops.delete(state.issueId)
     return
   }
@@ -79,7 +89,7 @@ async function tick(state: LoopState): Promise<void> {
     const currentState = issue.state?.name
 
     if (currentState && isTerminalState(currentState)) {
-      console.info(`[Linear Light] completion loop: ${state.issueIdentifier} is "${currentState}", stopping loop`)
+      _logger.info(`[Linear Light] completion loop: ${state.issueIdentifier} is "${currentState}", stopping loop`)
       activeLoops.delete(state.issueId)
       return
     }
@@ -87,7 +97,7 @@ async function tick(state: LoopState): Promise<void> {
     // Check max iterations before dispatching
     const config = getConfig()
     if (config.maxIterations > 0 && state.iterations >= config.maxIterations) {
-      console.info(
+      _logger.info(
         `[Linear Light] completion loop: ${state.issueIdentifier} reached max iterations (${config.maxIterations}), stopping`,
       )
       activeLoops.delete(state.issueId)
@@ -96,7 +106,7 @@ async function tick(state: LoopState): Promise<void> {
 
     // Dispatch follow-up prompt
     state.iterations++
-    console.info(
+    _logger.info(
       `[Linear Light] completion loop: prompting agent for ${state.issueIdentifier} (iteration ${state.iterations})`,
     )
 
@@ -112,13 +122,13 @@ async function tick(state: LoopState): Promise<void> {
     // If this iteration just hit the max, don't re-schedule
     if (config.maxIterations > 0 && state.iterations >= config.maxIterations) {
       shouldContinue = false
-      console.info(
+      _logger.info(
         `[Linear Light] completion loop: ${state.issueIdentifier} reached max iterations (${config.maxIterations}), stopping`,
       )
       activeLoops.delete(state.issueId)
     }
   } catch (err) {
-    console.error(`[Linear Light] completion loop tick error for ${state.issueIdentifier}:`, err)
+    _logger.error(`[Linear Light] completion loop tick error for ${state.issueIdentifier}: ${err}`)
     // Don't stop the loop on error — retry next interval
   }
 
@@ -180,7 +190,7 @@ export function startCompletionLoop(params: { issueId: string; issueIdentifier: 
   }
   activeLoops.set(issueId, state)
 
-  console.info(`[Linear Light] completion loop started for ${issueIdentifier} (interval: ${config.intervalMs / 1000}s)`)
+  _logger.info(`[Linear Light] completion loop started for ${issueIdentifier} (interval: ${config.intervalMs / 1000}s)`)
 }
 
 /**
@@ -191,7 +201,7 @@ export function stopCompletionLoop(issueId: string): void {
   if (loop) {
     clearTimeout(loop.timer)
     activeLoops.delete(issueId)
-    console.info(`[Linear Light] completion loop stopped for ${loop.issueIdentifier}`)
+    _logger.info(`[Linear Light] completion loop stopped for ${loop.issueIdentifier}`)
   }
 }
 
