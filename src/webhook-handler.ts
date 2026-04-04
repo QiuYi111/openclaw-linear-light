@@ -13,7 +13,7 @@ import {
   dispatchInboundReplyWithBase,
   type OpenClawConfig,
 } from "openclaw/plugin-sdk"
-import { agentSessionMap } from "../index.js"
+import { agentSessionMap, identifierSessionMap } from "../index.js"
 import { LinearAgentApi, resolveLinearToken } from "./api/linear-api.js"
 import { setCompletionLoopConfig, startCompletionLoop } from "./completion-loop.js"
 import { getLinearRuntime, setLinearApi } from "./runtime.js"
@@ -205,7 +205,10 @@ async function handleSessionCreated(
   const prompt = isMentionTriggered ? commentBody : issue.description || issue.title
 
   // Store agent session ID for emitActivity
-  if (session.id) agentSessionMap.set(issue.id, session.id)
+  if (session.id) {
+    agentSessionMap.set(issue.id, session.id)
+    identifierSessionMap.set(issue.identifier, session.id)
+  }
 
   // Update issue status to In Progress
   const linearApi = makeLinearApi(config, api)
@@ -267,7 +270,10 @@ async function handleSessionPrompted(
   if (!(session.issue.id && session.issue.identifier)) return
   if (activity.signal === "stop") return
 
-  if (session.id) agentSessionMap.set(session.issue.id, session.id)
+  if (session.id) {
+    agentSessionMap.set(session.issue.id, session.id)
+    identifierSessionMap.set(session.issue.identifier, session.id)
+  }
 
   const prompt = sanitizePromptInput(activity.content.body)
   const body = [`[Linear ${session.issue.identifier} follow-up]`, prompt, ``, getAgentIdentity(config)].join("\n")

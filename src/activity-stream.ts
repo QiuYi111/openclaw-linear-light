@@ -14,7 +14,7 @@
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type HookContext = any
 
-import { agentSessionMap, scheduleSessionCleanup } from "../index.js"
+import { identifierSessionMap, scheduleSessionCleanup } from "../index.js"
 import { getLinearApi } from "./runtime.js"
 
 // ---------------------------------------------------------------------------
@@ -103,11 +103,12 @@ async function emitResponse(agentSessionId: string, body: string): Promise<void>
 // ---------------------------------------------------------------------------
 
 function resolveAgentSessionId(sessionKey: string): string | null {
-  // sessionKey format: "linear:<issue-uuid>"
-  // agentSessionMap: issueId → linear agent session ID
-  if (!sessionKey.startsWith("linear:")) return null
-  const issueId = sessionKey.slice("linear:".length)
-  return agentSessionMap.get(issueId) ?? null
+  // sessionKey format: "agent:main:linear:direct:<identifier>" (e.g. "agent:main:linear:direct:DEV-163")
+  // identifierSessionMap: identifier → linear agent session ID
+  if (!sessionKey.includes(":linear:")) return null
+  const parts = sessionKey.split(":")
+  const identifier = parts[parts.length - 1]
+  return identifierSessionMap.get(identifier) ?? null
 }
 
 // ---------------------------------------------------------------------------
@@ -123,7 +124,7 @@ export async function onLlmOutput(
   ctx: HookContext,
 ): Promise<void> {
   const sessionKey = ctx.sessionKey
-  if (!sessionKey?.startsWith("linear:")) return
+  if (!sessionKey?.includes(":linear:")) return
 
   const agentSessionId = resolveAgentSessionId(sessionKey)
   if (!agentSessionId) return
@@ -154,7 +155,7 @@ export async function onLlmOutput(
  */
 export function onBeforeToolCall(event: { toolName: string; input: unknown }, ctx: HookContext): void {
   const sessionKey = ctx.sessionKey
-  if (!sessionKey?.startsWith("linear:")) return
+  if (!sessionKey?.includes(":linear:")) return
 
   const agentSessionId = resolveAgentSessionId(sessionKey)
   if (!agentSessionId) return
@@ -173,7 +174,7 @@ export function onBeforeToolCall(event: { toolName: string; input: unknown }, ct
  */
 export function onAfterToolCall(event: { toolName: string; output: unknown }, ctx: HookContext): void {
   const sessionKey = ctx.sessionKey
-  if (!sessionKey?.startsWith("linear:")) return
+  if (!sessionKey?.includes(":linear:")) return
 
   const agentSessionId = resolveAgentSessionId(sessionKey)
   if (!agentSessionId) return
@@ -196,7 +197,7 @@ export async function onAgentEnd(
   ctx: HookContext,
 ): Promise<void> {
   const sessionKey = ctx.sessionKey
-  if (!sessionKey?.startsWith("linear:")) return
+  if (!sessionKey?.includes(":linear:")) return
 
   const agentSessionId = resolveAgentSessionId(sessionKey)
   if (!agentSessionId) return
@@ -214,7 +215,8 @@ export async function onAgentEnd(
   // Cleanup after a delay (in case of follow-up)
   setTimeout(() => cleanupStreamState(sessionKey), 5000)
 
-  // Clean up agentSessionMap entry to prevent unbounded growth
-  const issueId = sessionKey.slice("linear:".length)
-  scheduleSessionCleanup(issueId)
+  // Clean up session map entries to prevent unbounded growth
+  const parts = sessionKey.split(":")
+  const identifier = parts[parts.length - 1]
+  scheduleSessionCleanup(identifier, identifier)
 }

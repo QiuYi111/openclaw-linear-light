@@ -32,12 +32,13 @@ describe("activity-stream", () => {
     }))
     vi.doMock("../../index.js", () => ({
       agentSessionMap: new Map([["issue-uuid-001", "linear-session-123"]]),
+      identifierSessionMap: new Map([["DEV-163", "linear-session-123"]]),
       scheduleSessionCleanup: vi.fn(),
     }))
     return await import("../activity-stream.js")
   }
 
-  function makeCtx(sessionKey = "linear:issue-uuid-001") {
+  function makeCtx(sessionKey = "agent:main:linear:direct:DEV-163") {
     return { sessionKey }
   }
 
@@ -55,7 +56,7 @@ describe("activity-stream", () => {
 
       await onLlmOutput(
         { assistantTexts: ["some text"], runId: "r1", sessionId: "s1" },
-        { sessionKey: "linear:unknown-uuid" },
+        { sessionKey: "agent:main:linear:direct:UNKNOWN-999" },
       )
 
       expect(mockEmitActivity).not.toHaveBeenCalled()
