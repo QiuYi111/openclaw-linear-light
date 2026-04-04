@@ -17,10 +17,11 @@ import type { ChannelPlugin, OpenClawPluginApi } from "openclaw/plugin-sdk"
 import { getChatChannelMeta } from "openclaw/plugin-sdk/core"
 import { onAfterToolCall, onAgentEnd, onBeforeToolCall, onLlmOutput } from "./src/activity-stream.js"
 import { LinearAgentApi, resolveLinearToken } from "./src/api/linear-api.js"
+import { setCompletionLoopConfig, setCompletionLoopDispatcher } from "./src/completion-loop.js"
 import { validateConfig } from "./src/config-validation.js"
 import { handleOAuthCallback, handleOAuthInit } from "./src/oauth-handler.js"
 import { setLinearApi, setLinearRuntime } from "./src/runtime.js"
-import { handleWebhook } from "./src/webhook-handler.js"
+import { dispatchCompletionPrompt, handleWebhook } from "./src/webhook-handler.js"
 
 // ---------------------------------------------------------------------------
 // Maps issueId → Linear agent session ID (for emitActivity)
@@ -130,6 +131,12 @@ export default function register(api: OpenClawPluginApi) {
   // @ts-expect-error — hook param shape varies across openclaw versions
   api.on("after_tool_call", onAfterToolCall)
   api.on("agent_end", onAgentEnd)
+
+  // Set up completion loop (Ralph loop)
+  setCompletionLoopConfig(config)
+  setCompletionLoopDispatcher((issueId, issueIdentifier, body) =>
+    dispatchCompletionPrompt(issueId, issueIdentifier, body),
+  )
 
   api.logger.info("Linear Light: ready (channel mode)")
 }

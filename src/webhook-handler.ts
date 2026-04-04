@@ -15,6 +15,7 @@ import {
 } from "openclaw/plugin-sdk"
 import { agentSessionMap } from "../index.js"
 import { LinearAgentApi, resolveLinearToken } from "./api/linear-api.js"
+import { setCompletionLoopConfig, startCompletionLoop } from "./completion-loop.js"
 import { getLinearRuntime, setLinearApi } from "./runtime.js"
 import { sanitizePromptInput } from "./utils.js"
 
@@ -152,6 +153,7 @@ export async function handleWebhook(api: OpenClawPluginApi, req: any, res: any):
   api.logger.info(`Linear Light: webhook ${body.type}/${body.action}`)
 
   try {
+    captureDispatchContext(api, config)
     await processWebhook(api, body, config)
     res.writeHead(200, { "Content-Type": "application/json" })
     res.end(JSON.stringify({ ok: true }))
@@ -243,6 +245,14 @@ async function handleSessionCreated(
   ].join("\n")
 
   await dispatchToAgent(api, { issue, body, config })
+
+  // Start completion loop — periodically prompt agent if issue not in terminal state
+  setCompletionLoopConfig(config)
+  startCompletionLoop({
+    issueId: issue.id,
+    issueIdentifier: issue.identifier,
+    sessionKey: `agent:main:linear:direct:${issue.identifier}`,
+  })
 }
 
 async function handleSessionPrompted(
@@ -263,6 +273,14 @@ async function handleSessionPrompted(
   const body = [`[Linear ${session.issue.identifier} follow-up]`, prompt, ``, getAgentIdentity(config)].join("\n")
 
   await dispatchToAgent(api, { issue: session.issue, body, config })
+
+  // Restart completion loop on follow-up
+  setCompletionLoopConfig(config)
+  startCompletionLoop({
+    issueId: session.issue.id,
+    issueIdentifier: session.issue.identifier,
+    sessionKey: `agent:main:linear:direct:${session.issue.identifier}`,
+  })
 }
 
 // ---------------------------------------------------------------------------
@@ -427,4 +445,37 @@ function makeLinearApi(config: Record<string, unknown> | undefined, api: OpenCla
   // Share the API instance for activity streaming hooks
   setLinearApi(linearApi)
   return linearApi
+}
+
+// ---------------------------------------------------------------------------
+// Completion loop dispatch bridge
+// ---------------------------------------------------------------------------
+
+let _lastApi: OpenClawPluginApi | null = null
+let _lastConfig: Record<string, unknown> | undefined
+
+/**
+ * Store the last used api/config for completion loop dispatch.
+ * Called from handleWebhook so the loop can dispatch without re-resolving everything.
+ */
+function captureDispatchContext(api: OpenClawPluginApi, config: Record<string, unknown> | undefined): void {
+  _lastApi = api
+  _lastConfig = config
+}
+
+/**
+ * Dispatch a completion loop prompt to the agent.
+ * Uses the captured dispatch context from the last webhook handler invocation.
+ */
+export async function dispatchCompletionPrompt(
+  issueId: string,
+  issueIdentifier: string,
+  prompt: string,
+): Promise<void> {
+  if (!_lastApi) return
+
+  const issue = { id: issueId, identifier: issueIdentifier, title: "", description: null, url: "" }
+  const body = [`[Linear ${issueIdentifier} completion check]`, prompt, ``, getAgentIdentity(_lastConfig)].join("\n")
+
+  await dispatchToAgent(_lastApi, { issue, body, config: _lastConfig })
 }
