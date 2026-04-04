@@ -8,9 +8,11 @@
  * - Issue reaches a terminal state (Done, Canceled)
  * - Explicit cancel via stopCompletionLoop()
  * - Max iterations reached (if configured)
+ *
+ * Loop state is persisted to disk so active loops survive gateway restarts.
  */
 
-import { agentSessionMap } from "../index.js"
+import { readPersistedLoops, writePersistedLoops } from "./api/loop-store.js"
 import { getLinearApi } from "./runtime.js"
 
 // ---------------------------------------------------------------------------
@@ -61,6 +63,38 @@ export function setCompletionLoopDispatcher(
 }
 
 // ---------------------------------------------------------------------------
+// Persistence helpers
+// ---------------------------------------------------------------------------
+
+/** Sync the in-memory activeLoops map to disk. */
+function persistLoops(): void {
+  const persisted: Record<
+    string,
+    { issueId: string; issueIdentifier: string; sessionKey: string; iterations: number; startedAt: number }
+  > = {}
+  for (const [issueId, state] of activeLoops) {
+    persisted[issueId] = {
+      issueId: state.issueId,
+      issueIdentifier: state.issueIdentifier,
+      sessionKey: state.sessionKey,
+      iterations: state.iterations,
+      startedAt: Date.now(), // best-effort; original startedAt is not tracked in-memory
+    }
+  }
+  writePersistedLoops(persisted)
+}
+
+/**
+ * Remove a specific issue from the persisted store.
+ * Call this after stopping a loop (terminal state, cancel, max iterations).
+ */
+function removePersistedLoop(issueId: string): void {
+  const all = readPersistedLoops()
+  delete all[issueId]
+  writePersistedLoops(all)
+}
+
+// ---------------------------------------------------------------------------
 // Core loop logic
 // ---------------------------------------------------------------------------
 
@@ -71,6 +105,7 @@ async function tick(state: LoopState): Promise<void> {
   if (!api) {
     console.error("[Linear Light] completion loop: no Linear API available, stopping")
     activeLoops.delete(state.issueId)
+    removePersistedLoop(state.issueId)
     return
   }
 
@@ -81,6 +116,7 @@ async function tick(state: LoopState): Promise<void> {
     if (currentState && isTerminalState(currentState)) {
       console.info(`[Linear Light] completion loop: ${state.issueIdentifier} is "${currentState}", stopping loop`)
       activeLoops.delete(state.issueId)
+      removePersistedLoop(state.issueId)
       return
     }
 
@@ -91,6 +127,7 @@ async function tick(state: LoopState): Promise<void> {
         `[Linear Light] completion loop: ${state.issueIdentifier} reached max iterations (${config.maxIterations}), stopping`,
       )
       activeLoops.delete(state.issueId)
+      removePersistedLoop(state.issueId)
       return
     }
 
@@ -116,6 +153,7 @@ async function tick(state: LoopState): Promise<void> {
         `[Linear Light] completion loop: ${state.issueIdentifier} reached max iterations (${config.maxIterations}), stopping`,
       )
       activeLoops.delete(state.issueId)
+      removePersistedLoop(state.issueId)
     }
   } catch (err) {
     console.error(`[Linear Light] completion loop tick error for ${state.issueIdentifier}:`, err)
@@ -179,6 +217,7 @@ export function startCompletionLoop(params: { issueId: string; issueIdentifier: 
     issueIdentifier,
   }
   activeLoops.set(issueId, state)
+  persistLoops()
 
   console.info(`[Linear Light] completion loop started for ${issueIdentifier} (interval: ${config.intervalMs / 1000}s)`)
 }
@@ -191,6 +230,7 @@ export function stopCompletionLoop(issueId: string): void {
   if (loop) {
     clearTimeout(loop.timer)
     activeLoops.delete(issueId)
+    removePersistedLoop(issueId)
     console.info(`[Linear Light] completion loop stopped for ${loop.issueIdentifier}`)
   }
 }
@@ -216,4 +256,78 @@ export function stopAllCompletionLoops(): void {
   for (const [issueId] of activeLoops) {
     stopCompletionLoop(issueId)
   }
+}
+
+/**
+ * Resume persisted loops from disk.
+ *
+ * Called at plugin startup. For each persisted loop:
+ * 1. Check if the issue is already in a terminal state → skip
+ * 2. Check if the feature is still enabled → skip
+ * 3. Check if max iterations is exceeded → skip
+ * 4. Otherwise, start the loop with the persisted iteration count
+ *
+ * After processing, the persisted file is rewritten with only the resumed loops.
+ */
+export async function resumePersistedLoops(): Promise<number> {
+  const persisted = readPersistedLoops()
+  const entries = Object.entries(persisted)
+  if (entries.length === 0) return 0
+
+  const config = getConfig()
+  if (!config.enabled) {
+    console.info("[Linear Light] completion loop: persistence found but feature is disabled, clearing")
+    writePersistedLoops({})
+    return 0
+  }
+
+  const api = getLinearApi()
+  if (!api) {
+    console.warn("[Linear Light] completion loop: persistence found but no Linear API available, skipping resume")
+    return 0
+  }
+
+  let resumed = 0
+  const stillActive: Record<string, (typeof persisted)[string]> = {}
+
+  for (const [issueId, loop] of entries) {
+    try {
+      // Check if issue has reached terminal state during downtime
+      const issue = await api.getIssueDetails(issueId)
+      if (issue.state?.name && isTerminalState(issue.state.name)) {
+        console.info(
+          `[Linear Light] completion loop: skipping resume for ${loop.issueIdentifier} — already "${issue.state.name}"`,
+        )
+        continue
+      }
+
+      // Check if max iterations exceeded
+      if (config.maxIterations > 0 && loop.iterations >= config.maxIterations) {
+        console.info(
+          `[Linear Light] completion loop: skipping resume for ${loop.issueIdentifier} — already at max iterations`,
+        )
+        continue
+      }
+
+      // Resume the loop
+      const state: LoopState = {
+        timer: setTimeout(() => tick(state), config.intervalMs),
+        iterations: loop.iterations,
+        issueId: loop.issueId,
+        sessionKey: loop.sessionKey,
+        issueIdentifier: loop.issueIdentifier,
+      }
+      activeLoops.set(issueId, state)
+      stillActive[issueId] = loop
+      resumed++
+      console.info(`[Linear Light] completion loop: resumed for ${loop.issueIdentifier} (iteration ${loop.iterations})`)
+    } catch (err) {
+      console.error(`[Linear Light] completion loop: failed to resume for ${loop.issueIdentifier}:`, err)
+    }
+  }
+
+  // Rewrite the persisted file with only the loops we actually resumed
+  writePersistedLoops(stillActive)
+
+  return resumed
 }

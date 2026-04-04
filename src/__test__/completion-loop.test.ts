@@ -7,6 +7,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 const mockGetLinearApi = vi.fn()
 const mockDispatchFn = vi.fn().mockResolvedValue(undefined)
 
+// Track calls to persistence functions
+let mockPersistedLoops: Record<string, unknown> = {}
+const writeCalls: unknown[][] = []
+
 vi.mock("../runtime.js", () => ({
   getLinearApi: (...args: any[]) => mockGetLinearApi(...args),
 }))
@@ -15,13 +19,30 @@ vi.mock("../../index.js", () => ({
   agentSessionMap: new Map(),
 }))
 
+vi.mock("../api/loop-store.js", () => ({
+  readPersistedLoops: () => ({ ...mockPersistedLoops }),
+  writePersistedLoops: (loops: unknown) => {
+    writeCalls.push([loops])
+    mockPersistedLoops = { ...(loops as Record<string, unknown>) }
+  },
+}))
+
 async function importFresh() {
   vi.resetModules()
+  mockPersistedLoops = {}
+  writeCalls.length = 0
   vi.doMock("../runtime.js", () => ({
     getLinearApi: (...args: any[]) => mockGetLinearApi(...args),
   }))
   vi.doMock("../../index.js", () => ({
     agentSessionMap: new Map(),
+  }))
+  vi.doMock("../api/loop-store.js", () => ({
+    readPersistedLoops: () => ({ ...mockPersistedLoops }),
+    writePersistedLoops: (loops: unknown) => {
+      writeCalls.push([loops])
+      mockPersistedLoops = { ...(loops as Record<string, unknown>) }
+    },
   }))
   return await import("../completion-loop.js")
 }
@@ -88,6 +109,28 @@ describe("completion-loop", () => {
       expect(mod.getActiveLoopCount()).toBe(1)
       mod.stopAllCompletionLoops()
     })
+
+    it("persists loop state to disk on start", async () => {
+      const mod = await importFresh()
+      mod.setCompletionLoopConfig({ completionLoopInterval: 10 })
+
+      mod.startCompletionLoop({
+        issueId: "issue-1",
+        issueIdentifier: "ENG-42",
+        sessionKey: "agent:main:linear:direct:ENG-42",
+      })
+
+      // writePersistedLoops should have been called
+      expect(writeCalls.length).toBeGreaterThanOrEqual(1)
+
+      // The written data should include the issue
+      const writtenData = writeCalls[0][0] as Record<string, unknown>
+      expect(writtenData["issue-1"]).toBeDefined()
+      expect((writtenData["issue-1"] as any).issueId).toBe("issue-1")
+      expect((writtenData["issue-1"] as any).issueIdentifier).toBe("ENG-42")
+
+      mod.stopAllCompletionLoops()
+    })
   })
 
   describe("stopCompletionLoop", () => {
@@ -133,6 +176,25 @@ describe("completion-loop", () => {
       mod.stopAllCompletionLoops()
 
       expect(mod.getActiveLoopCount()).toBe(0)
+    })
+
+    it("removes persisted state on stop", async () => {
+      const mod = await importFresh()
+      mod.setCompletionLoopConfig({ completionLoopInterval: 10 })
+
+      mod.startCompletionLoop({
+        issueId: "issue-1",
+        issueIdentifier: "ENG-42",
+        sessionKey: "agent:main:linear:direct:ENG-42",
+      })
+
+      writeCalls.length = 0
+
+      mod.stopCompletionLoop("issue-1")
+
+      // After stop, readPersistedLoops is called (to get current state for removal)
+      // and writePersistedLoops is called (to write updated state)
+      expect(writeCalls.length).toBeGreaterThanOrEqual(1)
     })
   })
 
@@ -368,6 +430,143 @@ describe("completion-loop", () => {
       const config = mod.getConfig()
 
       expect(config.intervalMs).toBe(60_000)
+    })
+  })
+
+  describe("resumePersistedLoops", () => {
+    it("returns 0 when no persisted loops exist", async () => {
+      const mod = await importFresh()
+      mod.setCompletionLoopConfig({ completionLoopInterval: 10 })
+
+      const count = await mod.resumePersistedLoops()
+      expect(count).toBe(0)
+      expect(mod.getActiveLoopCount()).toBe(0)
+    })
+
+    it("resumes a non-terminal loop from persistence", async () => {
+      const mod = await importFresh()
+      mockPersistedLoops = {
+        "issue-1": {
+          issueId: "issue-1",
+          issueIdentifier: "ENG-42",
+          sessionKey: "agent:main:linear:direct:ENG-42",
+          iterations: 3,
+          startedAt: Date.now() - 60_000,
+        },
+      }
+      mod.setCompletionLoopConfig({ completionLoopInterval: 10 })
+
+      const count = await mod.resumePersistedLoops()
+      expect(count).toBe(1)
+      expect(mod.isCompletionLoopActive("issue-1")).toBe(true)
+      expect(mod.getActiveLoopCount()).toBe(1)
+      mod.stopAllCompletionLoops()
+    })
+
+    it("skips loops for issues already in terminal state", async () => {
+      // Mock API returning Done state
+      mockGetLinearApi.mockReturnValue({
+        getIssueDetails: vi.fn().mockResolvedValue({ state: { name: "Done" } }),
+      })
+
+      const mod = await importFresh()
+      mockPersistedLoops = {
+        "issue-1": {
+          issueId: "issue-1",
+          issueIdentifier: "ENG-42",
+          sessionKey: "agent:main:linear:direct:ENG-42",
+          iterations: 2,
+          startedAt: Date.now() - 60_000,
+        },
+      }
+      mod.setCompletionLoopConfig({ completionLoopInterval: 10 })
+
+      const count = await mod.resumePersistedLoops()
+      expect(count).toBe(0)
+      expect(mod.isCompletionLoopActive("issue-1")).toBe(false)
+    })
+
+    it("skips resume when feature is disabled", async () => {
+      const mod = await importFresh()
+      mockPersistedLoops = {
+        "issue-1": {
+          issueId: "issue-1",
+          issueIdentifier: "ENG-42",
+          sessionKey: "agent:main:linear:direct:ENG-42",
+          iterations: 2,
+          startedAt: Date.now() - 60_000,
+        },
+      }
+      mod.setCompletionLoopConfig({ completionLoopEnabled: false, completionLoopInterval: 10 })
+
+      const count = await mod.resumePersistedLoops()
+      expect(count).toBe(0)
+    })
+
+    it("skips resume when no Linear API available", async () => {
+      mockGetLinearApi.mockReturnValue(null)
+
+      const mod = await importFresh()
+      mockPersistedLoops = {
+        "issue-1": {
+          issueId: "issue-1",
+          issueIdentifier: "ENG-42",
+          sessionKey: "agent:main:linear:direct:ENG-42",
+          iterations: 2,
+          startedAt: Date.now() - 60_000,
+        },
+      }
+      mod.setCompletionLoopConfig({ completionLoopInterval: 10 })
+
+      const count = await mod.resumePersistedLoops()
+      expect(count).toBe(0)
+    })
+
+    it("skips loops that have exceeded max iterations", async () => {
+      const mod = await importFresh()
+      mockPersistedLoops = {
+        "issue-1": {
+          issueId: "issue-1",
+          issueIdentifier: "ENG-42",
+          sessionKey: "agent:main:linear:direct:ENG-42",
+          iterations: 5, // already at max
+          startedAt: Date.now() - 60_000,
+        },
+      }
+      mod.setCompletionLoopConfig({ completionLoopInterval: 10, completionLoopMaxIterations: 5 })
+
+      const count = await mod.resumePersistedLoops()
+      expect(count).toBe(0)
+      expect(mod.isCompletionLoopActive("issue-1")).toBe(false)
+    })
+
+    it("resumes with correct iteration count from persistence", async () => {
+      const mod = await importFresh()
+      mockPersistedLoops = {
+        "issue-1": {
+          issueId: "issue-1",
+          issueIdentifier: "ENG-42",
+          sessionKey: "agent:main:linear:direct:ENG-42",
+          iterations: 7,
+          startedAt: Date.now() - 60_000,
+        },
+      }
+      mod.setCompletionLoopConfig({
+        completionLoopInterval: 10,
+        completionLoopPrompt: "Continue {identifier} state={state} iter={iteration}",
+      })
+      mockDispatchFn.mockClear()
+      mod.setCompletionLoopDispatcher(mockDispatchFn)
+
+      await mod.resumePersistedLoops()
+
+      // Tick once to verify the iteration count is preserved
+      vi.advanceTimersByTime(10 * 60_000)
+      await vi.advanceTimersByTimeAsync(0)
+
+      // The prompt should use iteration 8 (7 + 1 from tick)
+      expect(mockDispatchFn).toHaveBeenLastCalledWith("issue-1", "ENG-42", expect.stringContaining("8"))
+      mod.stopAllCompletionLoops()
     })
   })
 })
