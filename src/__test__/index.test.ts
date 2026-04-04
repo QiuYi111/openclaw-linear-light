@@ -52,23 +52,6 @@ vi.mock("openclaw/plugin-sdk", () => ({
   })),
 }))
 
-// Mock getChatChannelMeta
-vi.mock("openclaw/plugin-sdk/core", () => ({
-  getChatChannelMeta: vi.fn(() => ({
-    id: "linear",
-    label: "Linear",
-    icon: "linear",
-    description: "Linear project management",
-    category: "developer-tools",
-    features: [],
-    configSchema: [],
-  })),
-  createPluginRuntimeStore: vi.fn(() => ({
-    setRuntime: vi.fn(),
-    getRuntime: vi.fn(() => null),
-  })),
-}))
-
 // Mock fetch for Linear API calls
 const mockFetch = vi.fn()
 vi.stubGlobal("fetch", mockFetch)
