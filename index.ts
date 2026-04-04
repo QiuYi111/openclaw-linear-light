@@ -13,8 +13,17 @@
  */
 
 import type { ChannelPlugin, OpenClawPluginApi } from "openclaw/plugin-sdk"
-import { onAfterToolCall, onAgentEnd, onBeforeToolCall, onLlmOutput } from "./src/activity-stream.js"
+import {
+  onAfterToolCall,
+  onAgentEnd,
+  onBeforeToolCall,
+  onLlmOutput,
+  setActivityStreamLogger,
+} from "./src/activity-stream.js"
+import type { Logger } from "./src/api/linear-api.js"
 import { LinearAgentApi, resolveLinearToken } from "./src/api/linear-api.js"
+import { setLoopStoreLogger } from "./src/api/loop-store.js"
+import { setOauthStateStoreLogger } from "./src/api/oauth-state-store.js"
 import {
   resumePersistedLoops,
   setCompletionLoopConfig,
@@ -59,6 +68,12 @@ export default function register(api: OpenClawPluginApi) {
 
   // Store runtime for channel utilities access
   setLinearRuntime(api.runtime)
+
+  // Inject logger into modules that don't receive api directly
+  const pluginLogger = api.logger as unknown as Logger
+  setActivityStreamLogger(pluginLogger)
+  setLoopStoreLogger(pluginLogger)
+  setOauthStateStoreLogger(pluginLogger)
 
   // Register OAuth routes (always available — needed for first token)
   api.registerHttpRoute({

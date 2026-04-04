@@ -294,13 +294,15 @@ describe("activity-stream", () => {
   describe("error handling", () => {
     it("emitThought catches and logs errors without throwing", async () => {
       mockEmitActivity.mockRejectedValue(new Error("network error"))
-      const { onLlmOutput } = await importFresh()
+      const mod = await importFresh()
+
+      const mockLogger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+      mod.setActivityStreamLogger(mockLogger)
 
       const ctx = makeCtx()
       vi.advanceTimersByTime(3000)
-      const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {})
 
-      await onLlmOutput(
+      await mod.onLlmOutput(
         {
           assistantTexts: ["This is a sufficiently long text that exceeds twenty characters"],
           runId: "r1",
@@ -309,35 +311,34 @@ describe("activity-stream", () => {
         ctx,
       )
 
-      expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining("failed to emit thought"), expect.any(Error))
-      consoleSpy.mockRestore()
+      expect(mockLogger.error).toHaveBeenCalledWith(expect.stringContaining("failed to emit thought"))
     })
 
     it("emitResponse catches and logs errors without throwing", async () => {
       mockEmitActivity.mockRejectedValue(new Error("network error"))
-      const { onLlmOutput, onAgentEnd } = await importFresh()
+      const mod = await importFresh()
+
+      const mockLogger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+      mod.setActivityStreamLogger(mockLogger)
 
       const ctx = makeCtx()
-      await onLlmOutput({ assistantTexts: ["Final response text here"], runId: "r1", sessionId: "s1" }, ctx)
+      await mod.onLlmOutput({ assistantTexts: ["Final response text here"], runId: "r1", sessionId: "s1" }, ctx)
+      await mod.onAgentEnd({ success: true, messages: [] }, ctx)
 
-      const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {})
-      await onAgentEnd({ success: true, messages: [] }, ctx)
-
-      expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining("failed to emit response"), expect.any(Error))
-      consoleSpy.mockRestore()
+      expect(mockLogger.error).toHaveBeenCalledWith(expect.stringContaining("failed to emit response"))
     })
 
     it("emitAction catches and logs errors without throwing", async () => {
       mockEmitActivity.mockRejectedValue(new Error("network error"))
-      const { onBeforeToolCall } = await importFresh()
+      const mod = await importFresh()
 
-      const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {})
+      const mockLogger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+      mod.setActivityStreamLogger(mockLogger)
 
-      onBeforeToolCall({ toolName: "search", input: {} }, makeCtx())
+      mod.onBeforeToolCall({ toolName: "search", input: {} }, makeCtx())
       await vi.advanceTimersByTimeAsync(0)
 
-      expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining("failed to emit action"), expect.any(Error))
-      consoleSpy.mockRestore()
+      expect(mockLogger.error).toHaveBeenCalledWith(expect.stringContaining("failed to emit action"))
     })
   })
 })
