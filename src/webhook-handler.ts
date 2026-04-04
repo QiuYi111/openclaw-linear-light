@@ -13,8 +13,8 @@ import {
   dispatchInboundReplyWithBase,
   type OpenClawConfig,
 } from "openclaw/plugin-sdk"
-import { agentSessionMap } from "../index.js"
-import type { LinearAgentApi } from "./api/linear-api.js"
+import { agentSessionMap, identifierSessionMap } from "../index.js"
+import type { LinearAgentApi, Logger } from "./api/linear-api.js"
 import { resolveLinearToken } from "./api/linear-api.js"
 import { setCompletionLoopConfig, startCompletionLoop } from "./completion-loop.js"
 import { getLinearApi, getLinearRuntime } from "./runtime.js"
@@ -206,7 +206,10 @@ async function handleSessionCreated(
   const prompt = isMentionTriggered ? commentBody : issue.description || issue.title
 
   // Store agent session ID for emitActivity
-  if (session.id) agentSessionMap.set(issue.id, session.id)
+  if (session.id) {
+    agentSessionMap.set(issue.id, session.id)
+    identifierSessionMap.set(issue.identifier, session.id)
+  }
 
   // Update issue status to In Progress
   const linearApi = makeLinearApi(config, api)
@@ -268,7 +271,10 @@ async function handleSessionPrompted(
   if (!(session.issue.id && session.issue.identifier)) return
   if (activity.signal === "stop") return
 
-  if (session.id) agentSessionMap.set(session.issue.id, session.id)
+  if (session.id) {
+    agentSessionMap.set(session.issue.id, session.id)
+    identifierSessionMap.set(session.issue.identifier, session.id)
+  }
 
   const prompt = sanitizePromptInput(activity.content.body)
   const body = [`[Linear ${session.issue.identifier} follow-up]`, prompt, ``, getAgentIdentity(config)].join("\n")
@@ -444,6 +450,7 @@ function makeLinearApi(config: Record<string, unknown> | undefined, _api: OpenCl
 
 let _lastApi: OpenClawPluginApi | null = null
 let _lastConfig: Record<string, unknown> | undefined
+let _logger: Logger = console as unknown as Logger
 
 /**
  * Store the last used api/config for completion loop dispatch.
@@ -452,6 +459,7 @@ let _lastConfig: Record<string, unknown> | undefined
 function captureDispatchContext(api: OpenClawPluginApi, config: Record<string, unknown> | undefined): void {
   _lastApi = api
   _lastConfig = config
+  _logger = api.logger as unknown as Logger
 }
 
 /**
@@ -464,7 +472,7 @@ export async function dispatchCompletionPrompt(
   prompt: string,
 ): Promise<void> {
   if (!_lastApi) {
-    console.warn(`[Linear Light] dispatchCompletionPrompt: no API context captured yet, skipping ${issueIdentifier}`)
+    _logger.warn(`[Linear Light] dispatchCompletionPrompt: no API context captured yet, skipping ${issueIdentifier}`)
     return
   }
 

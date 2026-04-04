@@ -13,8 +13,17 @@
  */
 
 import type { ChannelPlugin, OpenClawPluginApi } from "openclaw/plugin-sdk"
-import { onAfterToolCall, onAgentEnd, onBeforeToolCall, onLlmOutput } from "./src/activity-stream.js"
+import {
+  onAfterToolCall,
+  onAgentEnd,
+  onBeforeToolCall,
+  onLlmOutput,
+  setActivityStreamLogger,
+} from "./src/activity-stream.js"
+import type { Logger } from "./src/api/linear-api.js"
 import { LinearAgentApi, resolveLinearToken } from "./src/api/linear-api.js"
+import { setLoopStoreLogger } from "./src/api/loop-store.js"
+import { setOauthStateStoreLogger } from "./src/api/oauth-state-store.js"
 import {
   resumePersistedLoops,
   setCompletionLoopConfig,
@@ -28,9 +37,22 @@ import { dispatchCompletionPrompt, handleWebhook } from "./src/webhook-handler.j
 
 // ---------------------------------------------------------------------------
 // Maps issueId → Linear agent session ID (for emitActivity)
+// Maps issue identifier (e.g. "DEV-163") → Linear agent session ID (for activity stream hooks)
+// Entries are cleaned up after agent_end + a short grace period for late activity.
 // ---------------------------------------------------------------------------
 
+const SESSION_CLEANUP_DELAY_MS = 30_000
+
 export const agentSessionMap = new Map<string, string>()
+export const identifierSessionMap = new Map<string, string>()
+
+/** Schedule removal of session map entries after a grace period. */
+export function scheduleSessionCleanup(issueId: string, identifier: string): void {
+  setTimeout(() => {
+    agentSessionMap.delete(issueId)
+    identifierSessionMap.delete(identifier)
+  }, SESSION_CLEANUP_DELAY_MS)
+}
 
 // ---------------------------------------------------------------------------
 // Plugin registration
@@ -46,6 +68,12 @@ export default function register(api: OpenClawPluginApi) {
 
   // Store runtime for channel utilities access
   setLinearRuntime(api.runtime)
+
+  // Inject logger into modules that don't receive api directly
+  const pluginLogger = api.logger as unknown as Logger
+  setActivityStreamLogger(pluginLogger)
+  setLoopStoreLogger(pluginLogger)
+  setOauthStateStoreLogger(pluginLogger)
 
   // Register OAuth routes (always available — needed for first token)
   api.registerHttpRoute({

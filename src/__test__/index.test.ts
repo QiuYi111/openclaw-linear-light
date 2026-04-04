@@ -271,7 +271,7 @@ describe("tools", () => {
   })
 
   it("linear_update_status tool updates issue state", async () => {
-    // Mock fetch for updateIssueState flow (3 calls)
+    // Mock fetch for updateIssueState flow (2 calls: combined query + update mutation)
     mockFetch
       .mockResolvedValueOnce({
         ok: true,
@@ -279,17 +279,12 @@ describe("tools", () => {
           Promise.resolve({
             data: {
               issue: {
-                id: "issue-1",
-                team: { id: "team-1", key: "ENG", name: "Eng" },
+                team: {
+                  id: "team-1",
+                  states: { nodes: [{ id: "s-done", name: "Done" }] },
+                },
               },
             },
-          }),
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: () =>
-          Promise.resolve({
-            data: { team: { states: { nodes: [{ id: "s-done", name: "Done" }] } } },
           }),
       })
       .mockResolvedValueOnce({
