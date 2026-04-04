@@ -28,9 +28,11 @@ import { dispatchCompletionPrompt, handleWebhook } from "./src/webhook-handler.j
 
 // ---------------------------------------------------------------------------
 // Maps issueId → Linear agent session ID (for emitActivity)
+// Maps issue identifier (e.g. "DEV-163") → Linear agent session ID (for activity stream hooks)
 // ---------------------------------------------------------------------------
 
 export const agentSessionMap = new Map<string, string>()
+export const identifierSessionMap = new Map<string, string>()
 
 // ---------------------------------------------------------------------------
 // Plugin registration
