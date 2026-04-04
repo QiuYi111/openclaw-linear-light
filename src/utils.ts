@@ -9,6 +9,10 @@
 export function sanitizePromptInput(text: string, maxLength = 4000): string {
   if (!text) return "(no content)"
   let sanitized = text.slice(0, maxLength)
-  sanitized = sanitized.replace(/\{\{/g, "{ {").replace(/\}\}/g, "} }")
+  // Escape all brace-based template interpolation patterns to prevent injection
+  sanitized = sanitized.replace(/\$\{([^}]*)\}/g, "$ { $1 }") // ${variable}
+  sanitized = sanitized.replace(/%\{([^}]*)\}/g, "% { $1 }") // %{variable}
+  sanitized = sanitized.replace(/\{\{/, "{ {") // {{variable}}
+  sanitized = sanitized.replace(/\{([a-zA-Z_]\w*)\}/g, "{ $1 }") // {identifier}, {state}, etc.
   return sanitized
 }

@@ -1231,7 +1231,29 @@ describe("sanitizePromptInput", () => {
 
   it("escapes double curly braces", async () => {
     const { sanitizePromptInput } = await import("../utils.js")
-    expect(sanitizePromptInput("hello {{world}}")).toBe("hello { {world} }")
+    expect(sanitizePromptInput("hello {{world}}")).toBe("hello { { world }}")
+  })
+
+  it("escapes dollar-brace template literals", async () => {
+    const { sanitizePromptInput } = await import("../utils.js")
+    expect(sanitizePromptInput("use ${variable} here")).toBe("use $ { variable } here")
+  })
+
+  it("escapes percent-brace patterns", async () => {
+    const { sanitizePromptInput } = await import("../utils.js")
+    expect(sanitizePromptInput("use %{variable} here")).toBe("use % { variable } here")
+  })
+
+  it("escapes single-brace identifier patterns", async () => {
+    const { sanitizePromptInput } = await import("../utils.js")
+    expect(sanitizePromptInput("{identifier} is in {state}")).toBe("{ identifier } is in { state }")
+    expect(sanitizePromptInput("{iteration} remaining")).toBe("{ iteration } remaining")
+  })
+
+  it("does not escape non-identifier braces", async () => {
+    const { sanitizePromptInput } = await import("../utils.js")
+    expect(sanitizePromptInput("{3} items")).toBe("{3} items")
+    expect(sanitizePromptInput("{ }")).toBe("{ }")
   })
 
   it("returns placeholder for empty input", async () => {
