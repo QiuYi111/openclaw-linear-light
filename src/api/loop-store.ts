@@ -11,8 +11,20 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import { homedir } from "node:os"
 import { join } from "node:path"
 
+import type { Logger } from "./linear-api.js"
+
 const LOOP_DIR = join(homedir(), ".openclaw", "plugins", "linear-light")
 const LOOP_PATH = join(LOOP_DIR, "completion-loops.json")
+
+// ---------------------------------------------------------------------------
+// Logger injection
+// ---------------------------------------------------------------------------
+
+let _logger: Logger = console as unknown as Logger
+
+export function setLoopStoreLogger(logger: Logger): void {
+  _logger = logger
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -64,6 +76,6 @@ export function writePersistedLoops(loops: PersistedLoopMap): void {
     writeFileSync(tmpPath, JSON.stringify(loops, null, 2), { encoding: "utf8", mode: 0o600 })
     renameSync(tmpPath, LOOP_PATH)
   } catch (err) {
-    console.error(`[Linear Light] failed to write loop store: ${err}`)
+    _logger.error(`[Linear Light] failed to write loop store: ${err}`)
   }
 }

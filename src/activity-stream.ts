@@ -15,6 +15,7 @@
 type HookContext = any
 
 import { identifierSessionMap } from "../index.js"
+import type { Logger } from "./api/linear-api.js"
 import { getLinearApi } from "./runtime.js"
 
 // ---------------------------------------------------------------------------
@@ -33,6 +34,16 @@ interface StreamState {
 const sessionStreams = new Map<string, StreamState>()
 const DEBOUNCE_MS = 2000
 const THOUGHT_MAX_LENGTH = 500
+
+// ---------------------------------------------------------------------------
+// Logger injection
+// ---------------------------------------------------------------------------
+
+let _logger: Logger = console as unknown as Logger
+
+export function setActivityStreamLogger(logger: Logger): void {
+  _logger = logger
+}
 
 function getStreamState(sessionKey: string): StreamState {
   let state = sessionStreams.get(sessionKey)
@@ -68,7 +79,7 @@ async function emitThought(agentSessionId: string, body: string): Promise<void> 
     })
   } catch (err) {
     // Non-critical — don't block agent
-    console.error("[Linear Light] failed to emit thought:", err)
+    _logger.error(`[Linear Light] failed to emit thought: ${err}`)
   }
 }
 
@@ -81,7 +92,7 @@ async function emitAction(agentSessionId: string, toolName: string, isStart: boo
       body: isStart ? `🔧 ${toolName}...` : `✅ ${toolName} done`,
     })
   } catch (err) {
-    console.error("[Linear Light] failed to emit action:", err)
+    _logger.error(`[Linear Light] failed to emit action: ${err}`)
   }
 }
 
@@ -94,7 +105,7 @@ async function emitResponse(agentSessionId: string, body: string): Promise<void>
       body: body.slice(0, 2000),
     })
   } catch (err) {
-    console.error("[Linear Light] failed to emit response:", err)
+    _logger.error(`[Linear Light] failed to emit response: ${err}`)
   }
 }
 
