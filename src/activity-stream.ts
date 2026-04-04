@@ -14,7 +14,7 @@
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type HookContext = any
 
-import { agentSessionMap } from "../index.js"
+import { agentSessionMap, scheduleSessionCleanup } from "../index.js"
 import { getLinearApi } from "./runtime.js"
 
 // ---------------------------------------------------------------------------
@@ -213,4 +213,8 @@ export async function onAgentEnd(
 
   // Cleanup after a delay (in case of follow-up)
   setTimeout(() => cleanupStreamState(sessionKey), 5000)
+
+  // Clean up agentSessionMap entry to prevent unbounded growth
+  const issueId = sessionKey.slice("linear:".length)
+  scheduleSessionCleanup(issueId)
 }
