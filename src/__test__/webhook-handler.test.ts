@@ -29,9 +29,11 @@ vi.mock("openclaw/plugin-sdk", () => ({
   })),
 }))
 
-// Mock runtime store
+// Controllable mock for getLinearApi — tests can set mockLinearApiReturnValue to null
+let mockLinearApiReturnValue: any = null
 vi.mock("../runtime.js", () => ({
   getLinearRuntime: vi.fn(() => mockRuntime),
+  getLinearApi: vi.fn(() => mockLinearApiReturnValue),
   setLinearApi: vi.fn(),
 }))
 
@@ -54,6 +56,19 @@ const mockRuntime = {
       dispatchReplyWithBufferedBlockDispatcher: vi.fn(),
     },
   },
+}
+
+const mockLinearApi = {
+  updateIssueState: vi.fn().mockResolvedValue(undefined),
+  emitActivity: vi.fn().mockResolvedValue(undefined),
+  createComment: vi.fn().mockResolvedValue("comment-1"),
+  getIssueDetails: vi.fn().mockResolvedValue({
+    id: "issue-1",
+    identifier: "ENG-42",
+    title: "Test",
+    description: null,
+    url: "https://linear.app/test/ENG-42",
+  }),
 }
 
 const mockFetch = vi.fn()
@@ -149,8 +164,19 @@ describe("handleWebhook", () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
+    mockLinearApiReturnValue = mockLinearApi
     mockDispatchInboundReplyWithBase.mockResolvedValue(undefined)
     mockFetch.mockReset()
+    mockLinearApi.updateIssueState.mockResolvedValue(undefined)
+    mockLinearApi.emitActivity.mockResolvedValue(undefined)
+    mockLinearApi.createComment.mockResolvedValue("comment-1")
+    mockLinearApi.getIssueDetails.mockResolvedValue({
+      id: "issue-1",
+      identifier: "ENG-42",
+      title: "Test",
+      description: null,
+      url: "https://linear.app/test/ENG-42",
+    })
     mockRuntime.channel.routing.resolveAgentRoute.mockReturnValue({
       agentId: "agent-main",
       sessionKey: "agent:main:linear:direct:ENG-42",
@@ -376,58 +402,18 @@ describe("handleWebhook", () => {
       const { handleWebhook } = await import("../webhook-handler.js")
       const api = makeApi({ accessToken: "lin_test_token" })
 
-      // Mock fetch for updateIssueState flow (3 calls) + emitActivity (1 call)
-      mockFetch
-        .mockResolvedValueOnce({
-          ok: true,
-          json: () =>
-            Promise.resolve({
-              data: {
-                issue: {
-                  id: `issue-uid-${uid}`,
-                  identifier: `ENG-${uid + 100}`,
-                  team: { id: "team-001", key: "ENG", name: "Engineering" },
-                },
-              },
-            }),
-        })
-        .mockResolvedValueOnce({
-          ok: true,
-          json: () =>
-            Promise.resolve({
-              data: {
-                team: {
-                  states: {
-                    nodes: [
-                      { id: "s-todo", name: "Todo" },
-                      { id: "s-ip", name: "In Progress" },
-                      { id: "s-done", name: "Done" },
-                    ],
-                  },
-                },
-              },
-            }),
-        })
-        .mockResolvedValueOnce({
-          ok: true,
-          json: () => Promise.resolve({ data: { issueUpdate: { success: true } } }),
-        })
-        .mockResolvedValueOnce({
-          ok: true,
-          json: () => Promise.resolve({ data: { agentActivityCreate: { success: true } } }),
-        })
-
       const payload = uniqueCreated()
       const { req, res } = makeSignedReq(payload, SECRET)
 
       await handleWebhook(api, req, res)
 
       expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
-      // 3 fetch calls for status update + 1 for emitActivity
-      expect(mockFetch).toHaveBeenCalledTimes(4)
-      const updateCall = mockFetch.mock.calls[2]
-      const body = JSON.parse(updateCall[1].body)
-      expect(body.variables.input.stateId).toBe("s-ip")
+      // updateIssueState and emitActivity called via shared mockLinearApi
+      expect(mockLinearApi.updateIssueState).toHaveBeenCalledWith(payload.agentSession.issue.id, "In Progress")
+      expect(mockLinearApi.emitActivity).toHaveBeenCalledWith(
+        payload.agentSession.id,
+        expect.objectContaining({ type: "response" }),
+      )
     })
 
     it("skips session without issue", async () => {
@@ -522,12 +508,12 @@ describe("handleWebhook", () => {
       expect(mockDispatchInboundReplyWithBase).not.toHaveBeenCalled()
     })
 
-    it("handles autoInProgress fetch failure gracefully", async () => {
+    it("handles autoInProgress failure gracefully", async () => {
       const { handleWebhook } = await import("../webhook-handler.js")
       const api = makeApi({ accessToken: "lin_test_token" })
 
-      // First call fails (getIssueDetails for updateIssueState)
-      mockFetch.mockRejectedValueOnce(new Error("fetch failed"))
+      mockLinearApi.updateIssueState.mockRejectedValueOnce(new Error("update failed"))
+      mockLinearApi.emitActivity.mockRejectedValueOnce(new Error("emit failed"))
 
       const payload = uniqueCreated()
       const { req, res } = makeSignedReq(payload, SECRET)
@@ -655,11 +641,6 @@ describe("handleWebhook", () => {
       const { handleWebhook } = await import("../webhook-handler.js")
       const api = makeApi({ accessToken: "lin_test_token" })
 
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: () => Promise.resolve({ data: { commentCreate: { success: true, comment: { id: "c-deliver" } } } }),
-      })
-
       const payload = uniqueCreated()
       const { req, res } = makeSignedReq(payload, SECRET)
 
@@ -669,23 +650,14 @@ describe("handleWebhook", () => {
       const dispatchCall = mockDispatchInboundReplyWithBase.mock.calls[0][0]
       await dispatchCall.deliver({ text: "Agent reply text" })
 
-      expect(mockFetch).toHaveBeenCalledWith(
-        expect.stringContaining("api.linear.app"),
-        expect.objectContaining({
-          method: "POST",
-        }),
-      )
+      expect(mockLinearApi.createComment).toHaveBeenCalledWith(payload.agentSession.issue.id, "Agent reply text")
     })
 
     it("deliver callback logs error when createComment fails", async () => {
       const { handleWebhook } = await import("../webhook-handler.js")
       const api = makeApi({ accessToken: "lin_test_token" })
 
-      mockFetch.mockResolvedValueOnce({
-        ok: false,
-        status: 500,
-        text: () => Promise.resolve("Server Error"),
-      })
+      mockLinearApi.createComment.mockRejectedValueOnce(new Error("Server Error"))
 
       const payload = uniqueCreated()
       const { req, res } = makeSignedReq(payload, SECRET)
@@ -706,20 +678,21 @@ describe("handleWebhook", () => {
 
       await handleWebhook(api, req, res)
 
-      // Clear any fetch calls from dispatch
-      mockFetch.mockClear()
+      mockLinearApi.createComment.mockClear()
 
       const dispatchCall = mockDispatchInboundReplyWithBase.mock.calls[0][0]
       await dispatchCall.deliver({ text: undefined })
 
-      // No fetch call should be made for empty text
-      expect(mockFetch).not.toHaveBeenCalled()
+      // No createComment call should be made for empty text
+      expect(mockLinearApi.createComment).not.toHaveBeenCalled()
     })
 
-    it("deliver callback logs error when no access token available", async () => {
+    it("deliver callback logs error when no shared api instance", async () => {
       const { handleWebhook } = await import("../webhook-handler.js")
-      // No accessToken — makeLinearApi returns null
-      const api = makeApi({ autoInProgress: false, accessToken: "" })
+
+      mockLinearApiReturnValue = null
+
+      const api = makeApi({ autoInProgress: false, accessToken: "lin_test_token" })
       const payload = uniqueCreated()
       const { req, res } = makeSignedReq(payload, SECRET)
 
@@ -734,13 +707,6 @@ describe("handleWebhook", () => {
     it("deliver callback logs success after creating comment", async () => {
       const { handleWebhook } = await import("../webhook-handler.js")
       const api = makeApi({ accessToken: "lin_test_token" })
-
-      // First fetch: getIssueDetails (called during handleWebhook)
-      // Second fetch: createComment (called during deliver)
-      mockFetch.mockResolvedValue({
-        ok: true,
-        json: () => Promise.resolve({ data: { commentCreate: { success: true, comment: { id: "c-ok" } } } }),
-      })
 
       const payload = uniqueCreated()
       const { req, res } = makeSignedReq(payload, SECRET)
@@ -911,30 +877,6 @@ describe("handleWebhook", () => {
       const { handleWebhook } = await import("../webhook-handler.js")
       const api = makeApi({ accessToken: "lin_test_token" })
 
-      // Mock fetch for getIssueDetails
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: () =>
-          Promise.resolve({
-            data: {
-              issue: {
-                id: `issue-comment-${uid}`,
-                identifier: "ENG-99",
-                title: "Comment Issue",
-                description: "From comment",
-                url: "https://linear.app/eng/issue/ENG-99",
-                state: { name: "Todo", type: "unstarted" },
-                creator: null,
-                assignee: null,
-                labels: { nodes: [] },
-                team: { id: "team-001", key: "ENG", name: "Engineering" },
-                comments: { nodes: [] },
-                project: null,
-              },
-            },
-          }),
-      })
-
       const payload = {
         type: "Comment",
         action: "create",
@@ -953,9 +895,12 @@ describe("handleWebhook", () => {
       expect(mockDispatchInboundReplyWithBase).toHaveBeenCalled()
     })
 
-    it("comment fallback skips when no token available", async () => {
+    it("comment fallback skips when no shared api instance", async () => {
       const { handleWebhook } = await import("../webhook-handler.js")
-      const api = makeApi() // No accessToken configured
+
+      mockLinearApiReturnValue = null
+
+      const api = makeApi({ accessToken: "lin_test_token" })
       const payload = {
         type: "Comment",
         action: "create",
@@ -978,7 +923,7 @@ describe("handleWebhook", () => {
       const { handleWebhook } = await import("../webhook-handler.js")
       const api = makeApi({ accessToken: "lin_test_token" })
 
-      mockFetch.mockRejectedValueOnce(new Error("fetch failed"))
+      mockLinearApi.getIssueDetails.mockRejectedValueOnce(new Error("fetch failed"))
 
       const payload = {
         type: "Comment",
@@ -1048,28 +993,6 @@ describe("handleWebhook", () => {
       const api = makeApi({ accessToken: "lin_test_token", botUserId: "bot-user-uuid-001" })
 
       const commentIssueId = `issue-nonbot-${uid}`
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: () =>
-          Promise.resolve({
-            data: {
-              issue: {
-                id: commentIssueId,
-                identifier: "ENG-66",
-                title: "Non-Bot Comment",
-                description: "Test",
-                url: "https://linear.app/eng/issue/ENG-66",
-                state: { name: "Todo", type: "unstarted" },
-                creator: null,
-                assignee: null,
-                labels: { nodes: [] },
-                team: { id: "team-001", key: "ENG", name: "Engineering" },
-                comments: { nodes: [] },
-                project: null,
-              },
-            },
-          }),
-      })
 
       const payload = {
         type: "Comment",
@@ -1118,65 +1041,6 @@ describe("handleWebhook", () => {
       const api = makeApi({ accessToken: "lin_test_token" })
 
       const commentIssueId = `issue-cf-status-${uid}`
-      mockFetch
-        // 1) getIssueDetails (handleCommentCreate)
-        .mockResolvedValueOnce({
-          ok: true,
-          json: () =>
-            Promise.resolve({
-              data: {
-                issue: {
-                  id: commentIssueId,
-                  identifier: "ENG-88",
-                  title: "Comment Status",
-                  description: "Test",
-                  url: "https://linear.app/eng/issue/ENG-88",
-                  state: { name: "Todo", type: "unstarted" },
-                  creator: null,
-                  assignee: null,
-                  labels: { nodes: [] },
-                  team: { id: "team-001", key: "ENG", name: "Engineering" },
-                  comments: { nodes: [] },
-                  project: null,
-                },
-              },
-            }),
-        })
-        // 2) getIssueDetails (updateIssueState internal)
-        .mockResolvedValueOnce({
-          ok: true,
-          json: () =>
-            Promise.resolve({
-              data: {
-                issue: {
-                  id: commentIssueId,
-                  team: { id: "team-001", key: "ENG", name: "Engineering" },
-                },
-              },
-            }),
-        })
-        // 3) getTeamStates
-        .mockResolvedValueOnce({
-          ok: true,
-          json: () =>
-            Promise.resolve({
-              data: {
-                team: {
-                  states: {
-                    nodes: [
-                      { id: "s-todo", name: "Todo" },
-                      { id: "s-ip", name: "In Progress" },
-                    ],
-                  },
-                },
-              },
-            }),
-        })
-        // 4) issueUpdate
-        .mockResolvedValueOnce({
-          ok: true,
-          json: () => Promise.resolve({ data: { issueUpdate: { success: true } } }),
-        })
 
       const payload = {
         type: "Comment",
@@ -1194,7 +1058,8 @@ describe("handleWebhook", () => {
 
       expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
       expect(mockDispatchInboundReplyWithBase).toHaveBeenCalled()
-      expect(mockFetch).toHaveBeenCalledTimes(4)
+      expect(mockLinearApi.getIssueDetails).toHaveBeenCalledWith(commentIssueId)
+      expect(mockLinearApi.updateIssueState).toHaveBeenCalledWith(commentIssueId, "In Progress")
     })
   })
 

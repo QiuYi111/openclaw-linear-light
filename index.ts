@@ -23,7 +23,7 @@ import {
 } from "./src/completion-loop.js"
 import { validateConfig } from "./src/config-validation.js"
 import { handleOAuthCallback, handleOAuthInit } from "./src/oauth-handler.js"
-import { setLinearApi, setLinearRuntime } from "./src/runtime.js"
+import { getLinearApi, setLinearApi, setLinearRuntime } from "./src/runtime.js"
 import { dispatchCompletionPrompt, handleWebhook } from "./src/webhook-handler.js"
 
 // ---------------------------------------------------------------------------
@@ -109,6 +109,17 @@ export default function register(api: OpenClawPluginApi) {
 
   api.logger.info(`Linear Light: token source=${tokenInfo.source}, registering as channel...`)
 
+  // Create shared LinearAgentApi singleton — reused by sendText, tools, and webhook handler
+  const sharedLinearApi = new LinearAgentApi(tokenInfo.accessToken, {
+    refreshToken: tokenInfo.refreshToken,
+    expiresAt: tokenInfo.expiresAt,
+    clientId: (config?.linearClientId as string) || process.env.LINEAR_CLIENT_ID,
+    clientSecret: (config?.linearClientSecret as string) || process.env.LINEAR_CLIENT_SECRET,
+    source: tokenInfo.source,
+    logger: api.logger,
+  })
+  setLinearApi(sharedLinearApi)
+
   // Register webhook endpoint
   api.registerHttpRoute({
     path: "/linear-light/webhook",
@@ -183,25 +194,13 @@ const linearPlugin: ChannelPlugin = {
   },
   outbound: {
     deliveryMode: "direct",
-    sendText: async ({ cfg, to, text }) => {
+    sendText: async ({ to, text }) => {
       // `to` is the issue identifier (e.g. "DEV-134") from the session key
       // We need to resolve it to an issue UUID and post a comment
-      const pluginConfig = (cfg.plugins?.entries?.["linear-light"] as any)?.config
-      const tokenInfo = resolveLinearToken(pluginConfig)
-      if (!tokenInfo.accessToken) {
+      const linearApi = getLinearApi()
+      if (!linearApi) {
         return { channel: "linear", messageId: "", ok: false, error: "no access token" } as any
       }
-
-      const linearApi = new LinearAgentApi(tokenInfo.accessToken, {
-        refreshToken: tokenInfo.refreshToken,
-        expiresAt: tokenInfo.expiresAt,
-        clientId: (pluginConfig?.linearClientId as string) || process.env.LINEAR_CLIENT_ID,
-        clientSecret: (pluginConfig?.linearClientSecret as string) || process.env.LINEAR_CLIENT_SECRET,
-        source: tokenInfo.source,
-      })
-
-      // Share for activity streaming
-      setLinearApi(linearApi)
 
       try {
         // `to` could be issue identifier (DEV-134) or issue UUID
@@ -276,14 +275,7 @@ function createLinearTools(api: OpenClawPluginApi): any[] {
   const tokenInfo = resolveLinearToken(config)
   if (!tokenInfo.accessToken) return []
 
-  const linearApi = new LinearAgentApi(tokenInfo.accessToken, {
-    refreshToken: tokenInfo.refreshToken,
-    expiresAt: tokenInfo.expiresAt,
-    clientId: (config?.linearClientId as string) || process.env.LINEAR_CLIENT_ID,
-    clientSecret: (config?.linearClientSecret as string) || process.env.LINEAR_CLIENT_SECRET,
-    source: tokenInfo.source,
-    logger: api.logger,
-  })
+  const linearApi = getLinearApi()!
 
   return [
     {

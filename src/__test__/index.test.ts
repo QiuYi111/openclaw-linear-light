@@ -478,7 +478,6 @@ describe("outbound sendText", () => {
 
     const channelArg = api.registerChannel.mock.calls[0][0]
     const result = await channelArg.plugin.outbound.sendText({
-      cfg: api.config,
       to: "ENG-42",
       text: "Hello from agent",
     } as any)
@@ -487,20 +486,69 @@ describe("outbound sendText", () => {
     expect(result.channel).toBe("linear")
   })
 
-  it("sendText returns error when no access token", async () => {
+  it("sendText returns error when no shared api instance", async () => {
     const mod = await import("../../index.js")
     const api = makeApi()
     mod.default(api)
 
+    // Clear the shared instance to simulate no-token scenario
+    const { setLinearApi } = await import("../../src/runtime.js")
+    setLinearApi(null as any)
+
     const channelArg = api.registerChannel.mock.calls[0][0]
     const result = await channelArg.plugin.outbound.sendText({
-      cfg: { plugins: { entries: {} } },
       to: "ENG-42",
       text: "Hello",
     } as any)
 
     expect(result.ok).toBe(false)
     expect(result.error).toContain("no access token")
+  })
+
+  it("sendText reuses shared LinearAgentApi instance across calls", async () => {
+    const mod = await import("../../index.js")
+    const api = makeApi()
+    mod.default(api)
+
+    const { getLinearApi } = await import("../../src/runtime.js")
+    const sharedInstance = getLinearApi()
+
+    // gql + createComment for first call
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ data: { issue: { id: "resolved-uuid" } } }),
+    })
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ data: { commentCreate: { success: true, comment: { id: "c-1" } } } }),
+    })
+
+    const channelArg = api.registerChannel.mock.calls[0][0]
+    await channelArg.plugin.outbound.sendText({
+      to: "ENG-42",
+      text: "First call",
+    } as any)
+
+    // Instance should still be the same after sendText
+    expect(getLinearApi()).toBe(sharedInstance)
+
+    // gql + createComment for second call
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ data: { issue: { id: "resolved-uuid" } } }),
+    })
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ data: { commentCreate: { success: true, comment: { id: "c-2" } } } }),
+    })
+
+    await channelArg.plugin.outbound.sendText({
+      to: "ENG-42",
+      text: "Second call",
+    } as any)
+
+    // Still the same singleton — no new instances created
+    expect(getLinearApi()).toBe(sharedInstance)
   })
 
   it("sendText passes through UUID directly without gql call", async () => {
@@ -516,7 +564,6 @@ describe("outbound sendText", () => {
 
     const channelArg = api.registerChannel.mock.calls[0][0]
     const result = await channelArg.plugin.outbound.sendText({
-      cfg: api.config,
       to: "550e8400-e29b-41d4-a716-446655440000",
       text: "Direct UUID test",
     } as any)
@@ -544,7 +591,6 @@ describe("outbound sendText", () => {
 
     const channelArg = api.registerChannel.mock.calls[0][0]
     const result = await channelArg.plugin.outbound.sendText({
-      cfg: api.config,
       to: "linear:ENG-42",
       text: "Prefix strip test",
     } as any)
@@ -567,7 +613,6 @@ describe("outbound sendText", () => {
 
     const channelArg = api.registerChannel.mock.calls[0][0]
     const result = await channelArg.plugin.outbound.sendText({
-      cfg: api.config,
       to: "NONEXISTENT-99",
       text: "Should fail",
     } as any)
@@ -602,7 +647,6 @@ describe("outbound sendText", () => {
 
     const channelArg = api.registerChannel.mock.calls[0][0]
     const result = await channelArg.plugin.outbound.sendText({
-      cfg: api.config,
       to: "ENG-42",
       text: "Activity test",
     } as any)
@@ -639,7 +683,6 @@ describe("outbound sendText", () => {
 
     const channelArg = api.registerChannel.mock.calls[0][0]
     const result = await channelArg.plugin.outbound.sendText({
-      cfg: api.config,
       to: "ENG-42",
       text: "Activity fail test",
     } as any)
@@ -668,7 +711,6 @@ describe("outbound sendText", () => {
 
     const channelArg = api.registerChannel.mock.calls[0][0]
     const result = await channelArg.plugin.outbound.sendText({
-      cfg: api.config,
       to: "ENG-42",
       text: "Should fail",
     } as any)

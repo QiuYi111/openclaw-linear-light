@@ -14,9 +14,10 @@ import {
   type OpenClawConfig,
 } from "openclaw/plugin-sdk"
 import { agentSessionMap } from "../index.js"
-import { LinearAgentApi, resolveLinearToken } from "./api/linear-api.js"
+import type { LinearAgentApi } from "./api/linear-api.js"
+import { resolveLinearToken } from "./api/linear-api.js"
 import { setCompletionLoopConfig, startCompletionLoop } from "./completion-loop.js"
-import { getLinearRuntime, setLinearApi } from "./runtime.js"
+import { getLinearApi, getLinearRuntime } from "./runtime.js"
 import { sanitizePromptInput } from "./utils.js"
 
 const CHANNEL_ID = "linear" as const
@@ -431,20 +432,10 @@ async function dispatchToAgent(
   api.logger.info(`Linear Light: dispatched agent for ${issue.identifier} (channel mode)`)
 }
 
-function makeLinearApi(config: Record<string, unknown> | undefined, api: OpenClawPluginApi) {
+function makeLinearApi(config: Record<string, unknown> | undefined, _api: OpenClawPluginApi) {
   const tokenInfo = resolveLinearToken(config)
   if (!tokenInfo.accessToken) return null
-  const linearApi = new LinearAgentApi(tokenInfo.accessToken, {
-    refreshToken: tokenInfo.refreshToken,
-    expiresAt: tokenInfo.expiresAt,
-    clientId: (config?.linearClientId as string) || process.env.LINEAR_CLIENT_ID,
-    clientSecret: (config?.linearClientSecret as string) || process.env.LINEAR_CLIENT_SECRET,
-    source: tokenInfo.source,
-    logger: api.logger,
-  })
-  // Share the API instance for activity streaming hooks
-  setLinearApi(linearApi)
-  return linearApi
+  return getLinearApi()
 }
 
 // ---------------------------------------------------------------------------
