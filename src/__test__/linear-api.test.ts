@@ -1041,50 +1041,29 @@ describe("LinearAgentApi", () => {
       const { LinearAgentApi } = await import("../api/linear-api.js")
       const api = new LinearAgentApi("lin_api_test")
 
-      // First call: getIssueDetails
+      // Single combined query: issue with nested team states
       mockFetch.mockResolvedValueOnce({
         ok: true,
         json: () =>
           Promise.resolve({
             data: {
               issue: {
-                id: "issue-1",
-                identifier: "ENG-1",
-                title: "Test",
-                description: null,
-                state: { name: "Todo", type: "unstarted" },
-                team: { id: "team-1", key: "ENG", name: "Eng" },
-                creator: null,
-                assignee: null,
-                labels: { nodes: [] },
-                comments: { nodes: [] },
-                project: null,
-                url: "https://linear.app/eng/issue/ENG-1",
-              },
-            },
-          }),
-      })
-
-      // Second call: get team states
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: () =>
-          Promise.resolve({
-            data: {
-              team: {
-                states: {
-                  nodes: [
-                    { id: "state-todo", name: "Todo" },
-                    { id: "state-in-progress", name: "In Progress" },
-                    { id: "state-done", name: "Done" },
-                  ],
+                team: {
+                  id: "team-1",
+                  states: {
+                    nodes: [
+                      { id: "state-todo", name: "Todo" },
+                      { id: "state-in-progress", name: "In Progress" },
+                      { id: "state-done", name: "Done" },
+                    ],
+                  },
                 },
               },
             },
           }),
       })
 
-      // Third call: update issue
+      // Second call: update mutation
       mockFetch.mockResolvedValueOnce({
         ok: true,
         json: () =>
@@ -1096,8 +1075,11 @@ describe("LinearAgentApi", () => {
       const result = await api.updateIssueState("issue-1", "Done")
       expect(result).toBe(true)
 
+      // Verify only 2 fetch calls were made (combined query + update mutation)
+      expect(mockFetch).toHaveBeenCalledTimes(2)
+
       // Verify update mutation used correct state ID
-      const updateCall = mockFetch.mock.calls[2]
+      const updateCall = mockFetch.mock.calls[1]
       const body = JSON.parse(updateCall[1].body)
       expect(body.variables.input.stateId).toBe("state-done")
     })
@@ -1112,21 +1094,11 @@ describe("LinearAgentApi", () => {
           Promise.resolve({
             data: {
               issue: {
-                id: "issue-1",
-                team: { id: "team-1" },
-              },
-            },
-          }),
-      })
-
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: () =>
-          Promise.resolve({
-            data: {
-              team: {
-                states: {
-                  nodes: [{ id: "state-1", name: "In Progress" }],
+                team: {
+                  id: "team-1",
+                  states: {
+                    nodes: [{ id: "state-1", name: "In Progress" }],
+                  },
                 },
               },
             },
@@ -1155,21 +1127,11 @@ describe("LinearAgentApi", () => {
           Promise.resolve({
             data: {
               issue: {
-                id: "issue-1",
-                team: { id: "team-1" },
-              },
-            },
-          }),
-      })
-
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: () =>
-          Promise.resolve({
-            data: {
-              team: {
-                states: {
-                  nodes: [{ id: "state-1", name: "Todo" }],
+                team: {
+                  id: "team-1",
+                  states: {
+                    nodes: [{ id: "state-1", name: "Todo" }],
+                  },
                 },
               },
             },
@@ -1189,14 +1151,50 @@ describe("LinearAgentApi", () => {
           Promise.resolve({
             data: {
               issue: {
-                id: "issue-1",
-                team: null, // no team
+                team: null,
               },
             },
           }),
       })
 
       await expect(api.updateIssueState("issue-1", "Done")).rejects.toThrow("Cannot find team for issue")
+    })
+
+    it("uses combined query instead of separate getIssueDetails + team states", async () => {
+      const { LinearAgentApi } = await import("../api/linear-api.js")
+      const api = new LinearAgentApi("lin_api_test")
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            data: {
+              issue: {
+                team: {
+                  id: "team-1",
+                  states: { nodes: [{ id: "state-done", name: "Done" }] },
+                },
+              },
+            },
+          }),
+      })
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            data: { issueUpdate: { success: true } },
+          }),
+      })
+
+      await api.updateIssueState("issue-1", "Done")
+
+      // Verify the combined query is used (not separate getIssueDetails + TeamStates)
+      const firstCall = mockFetch.mock.calls[0]
+      const body = JSON.parse(firstCall[1].body)
+      expect(body.query).toContain("IssueTeamStates")
+      expect(body.query).toContain("team {")
+      expect(body.query).toContain("states { nodes { id name } }")
     })
   })
 })
