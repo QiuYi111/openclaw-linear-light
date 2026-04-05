@@ -465,7 +465,19 @@ function makeLinearApi(config: Record<string, unknown> | undefined, _api: OpenCl
 // ---------------------------------------------------------------------------
 
 const _contextMap = new Map<string, { api: OpenClawPluginApi; config: Record<string, unknown> | undefined }>()
+let _fallbackContext: { api: OpenClawPluginApi; config: Record<string, unknown> | undefined } | null = null
 let _logger: Logger = console as unknown as Logger
+
+/**
+ * Store a fallback api/config for use when per-issue context is unavailable
+ * (e.g. after gateway restart when completion loops resume from persistence).
+ */
+export function setFallbackDispatchContext(
+  api: OpenClawPluginApi,
+  config: Record<string, unknown> | undefined,
+): void {
+  _fallbackContext = { api, config }
+}
 
 /**
  * Store the api/config for a specific issue's completion loop dispatch.
@@ -490,7 +502,9 @@ export async function dispatchCompletionPrompt(
   issueIdentifier: string,
   prompt: string,
 ): Promise<void> {
-  const ctx = _contextMap.get(issueId)
+  // Use per-issue context if available, otherwise fall back to the plugin-level context
+  // (needed when completion loops resume from persistence after gateway restart)
+  const ctx = _contextMap.get(issueId) || _fallbackContext
   if (!ctx) {
     _logger.warn(`[Linear Light] dispatchCompletionPrompt: no API context captured for ${issueIdentifier}, skipping`)
     return
