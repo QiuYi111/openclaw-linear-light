@@ -33,7 +33,7 @@ import {
 import { validateConfig } from "./src/config-validation.js"
 import { handleOAuthCallback, handleOAuthInit } from "./src/oauth-handler.js"
 import { getLinearApi, setLinearApi, setLinearRuntime } from "./src/runtime.js"
-import { dispatchCompletionPrompt, handleWebhook } from "./src/webhook-handler.js"
+import { dispatchCompletionPrompt, handleWebhook, setFallbackDispatchContext } from "./src/webhook-handler.js"
 
 // ---------------------------------------------------------------------------
 // Maps issueId → Linear agent session ID (for emitActivity)
@@ -177,6 +177,7 @@ export default function register(api: OpenClawPluginApi) {
   // Set up completion loop (Ralph loop)
   setCompletionLoopConfig(config)
   setCompletionLoopLogger(api.logger)
+  setFallbackDispatchContext(api, config)
   setCompletionLoopDispatcher((issueId, issueIdentifier, body) =>
     dispatchCompletionPrompt(issueId, issueIdentifier, body),
   )

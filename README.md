@@ -153,6 +153,54 @@ Find your webhook signing secret in **Linear → Settings → API → OAuth Appl
 
 The webhook signature verification failed. Check that `webhookSecret` matches the signing secret from your Linear OAuth app settings.
 
+### Completion loop spins after gateway restart
+
+After a gateway restart, persisted completion loops resume but the in-memory dispatch context is empty. This was fixed in [#126](https://github.com/QiuYi111/openclaw-linear-light/pull/126) — ensure you're on a version that includes the fallback context fix.
+
+## Deployment Configuration
+
+### Agent Binding (Recommended)
+
+Route Linear channel traffic to a dedicated agent instead of the default `main` agent. This isolates Linear sessions from your personal conversations.
+
+In `openclaw.json`:
+
+```json
+{
+  "agents": {
+    "list": [
+      {
+        "id": "linear",
+        "name": "Linear Worker",
+        "workspace": "~/clawd",
+        "tools": { "allow": ["group:plugins"] }
+      }
+    ],
+    "bindings": [
+      { "channel": "linear", "agent": "linear" }
+    ]
+  }
+}
+```
+
+Without this binding, all Linear issue sessions run under the `main` agent and share its concurrency budget.
+
+### Concurrency
+
+By default, `agents.defaults.maxConcurrent` is `4`. If you expect many issues to be active simultaneously, increase this to avoid queuing:
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "maxConcurrent": 999
+    }
+  }
+}
+```
+
+The `maxConcurrent` setting applies globally to all agents (per-agent override is not supported). Set it high enough that Linear sessions never block on concurrency, but be mindful of API rate limits and gateway resource usage.
+
 ## Token Management
 
 The plugin resolves Linear API tokens in this order:
