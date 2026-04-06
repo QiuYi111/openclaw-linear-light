@@ -16,6 +16,7 @@ import {
 import { agentSessionMap, identifierSessionMap } from "../index.js"
 import type { LinearAgentApi, Logger } from "./api/linear-api.js"
 import { resolveLinearToken } from "./api/linear-api.js"
+import { resolveProjectInfo } from "./api/project-store.js"
 import { setCompletionLoopConfig, startCompletionLoop } from "./completion-loop.js"
 import { getLinearApi, getLinearRuntime } from "./runtime.js"
 import type {
@@ -45,6 +46,37 @@ function getAgentIdentity(config: Record<string, unknown> | undefined): string {
 function formatInitialResponse(config: Record<string, unknown> | undefined, identifier: string, title: string): string {
   const template = (config?.initialResponseTemplate as string) || DEFAULT_INITIAL_RESPONSE_TEMPLATE
   return template.replace("{identifier}", identifier).replace("{title}", title)
+}
+
+/**
+ * Build a project context section to inject into agent prompts.
+ * Returns empty string if the issue has no project or project memory is disabled.
+ */
+function buildProjectContextSection(
+  issue: { project?: { id: string; name: string } | null; url?: string },
+  config: Record<string, unknown> | undefined,
+  logger?: Logger,
+): string {
+  if (config?.projectMemoryEnabled === false) return ""
+
+  const projectInfo = resolveProjectInfo(issue.project ?? null, { logger })
+  if (!projectInfo) return ""
+
+  return [
+    "",
+    "---",
+    `**Project Memory** (${projectInfo.name}):`,
+    `This issue belongs to the Linear project "${projectInfo.name}".`,
+    `Project files are stored at: \`${projectInfo.dirPath}\``,
+    "",
+    "Before starting work:",
+    `- Read \`${projectInfo.dirPath}/CONTEXT.md\` for prior session context and technical state.`,
+    `- Read \`${projectInfo.dirPath}/README.md\` for the issue inventory and project overview.`,
+    "",
+    "When your work session ends or makes significant progress:",
+    `- Update \`${projectInfo.dirPath}/CONTEXT.md\` with current progress, findings, and next steps.`,
+    "- Commit and push the updated project files so future sessions can pick up where you left off.",
+  ].join("\n")
 }
 
 // Dedup tracking
@@ -249,11 +281,27 @@ async function handleSessionCreated(
   const safeDescription = issue.description ? sanitizePromptInput(issue.description) : ""
   const sanitizedPrompt = sanitizePromptInput(prompt)
 
+  // Resolve project context — fetch issue details since webhook payload lacks project field
+  let projectContext = ""
+  if (linearApi && config?.projectMemoryEnabled !== false) {
+    try {
+      const details = await linearApi.getIssueDetails(issue.id)
+      projectContext = buildProjectContextSection(
+        { project: details.project, url: details.url },
+        config,
+        api.logger as unknown as Logger,
+      )
+    } catch (err) {
+      api.logger.warn(`Linear Light: failed to resolve project context: ${err}`)
+    }
+  }
+
   const body = [
     `[Linear Issue ${issue.identifier}] ${safeTitle}`,
     safeDescription ? `\n---\nDescription:\n${safeDescription}` : "",
     isMentionTriggered ? `\n---\n**User comment:**\n${sanitizedPrompt}` : "",
     `\n---\nIssue URL: ${issue.url}`,
+    projectContext,
     ``,
     getAgentIdentity(config),
   ].join("\n")
@@ -348,11 +396,18 @@ async function handleCommentCreate(
   const safeTitle = sanitizePromptInput(issue.title, 200)
   const safeDescription = issue.description ? sanitizePromptInput(issue.description) : ""
 
+  const projectContext = buildProjectContextSection(
+    { project: issue.project, url: issue.url },
+    config,
+    api.logger as unknown as Logger,
+  )
+
   const body = [
     `[Linear Issue ${issue.identifier}] ${safeTitle}`,
     safeDescription ? `\n---\nDescription:\n${safeDescription}` : "",
     `\n---\n**User comment:**\n${sanitizedPrompt}`,
     `\n---\nIssue URL: ${issue.url}`,
+    projectContext,
     ``,
     getAgentIdentity(config),
   ].join("\n")
