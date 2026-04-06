@@ -1096,10 +1096,8 @@ describe("handleWebhook", () => {
 
       expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
       const dispatchCall = mockDispatchInboundReplyWithBase.mock.calls[0][0]
-      expect(dispatchCall.ctxPayload.Body).toContain("Project Memory")
-      expect(dispatchCall.ctxPayload.Body).toContain("My Project")
-      expect(dispatchCall.ctxPayload.Body).toContain("CONTEXT.md")
-      expect(dispatchCall.ctxPayload.Body).toContain("README.md")
+      expect(dispatchCall.ctxPayload.Body).toContain("Project memory")
+      expect(dispatchCall.ctxPayload.Body).toContain("follow its rules")
     })
 
     it("omits project context when issue has no project", async () => {
@@ -1113,7 +1111,7 @@ describe("handleWebhook", () => {
       await handleWebhook(api, req, res)
 
       const dispatchCall = mockDispatchInboundReplyWithBase.mock.calls[0][0]
-      expect(dispatchCall.ctxPayload.Body).not.toContain("Project Memory")
+      expect(dispatchCall.ctxPayload.Body).not.toContain("Project memory")
     })
 
     it("omits project context when projectMemoryEnabled is false", async () => {
@@ -1126,7 +1124,7 @@ describe("handleWebhook", () => {
       await handleWebhook(api, req, res)
 
       const dispatchCall = mockDispatchInboundReplyWithBase.mock.calls[0][0]
-      expect(dispatchCall.ctxPayload.Body).not.toContain("Project Memory")
+      expect(dispatchCall.ctxPayload.Body).not.toContain("Project memory")
       // getIssueDetails should not be called for project context when disabled
       expect(mockLinearApi.getIssueDetails).not.toHaveBeenCalled()
     })
@@ -1162,8 +1160,7 @@ describe("handleWebhook", () => {
 
       expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
       const dispatchCall = mockDispatchInboundReplyWithBase.mock.calls[0][0]
-      expect(dispatchCall.ctxPayload.Body).toContain("Project Memory")
-      expect(dispatchCall.ctxPayload.Body).toContain("Backend API")
+      expect(dispatchCall.ctxPayload.Body).toContain("Project memory")
     })
 
     it("gracefully handles getIssueDetails failure for project context", async () => {
@@ -1182,7 +1179,7 @@ describe("handleWebhook", () => {
       expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
       expect(mockLogger.warn).toHaveBeenCalledWith(expect.stringContaining("failed to resolve project context"))
       const dispatchCall = mockDispatchInboundReplyWithBase.mock.calls[0][0]
-      expect(dispatchCall.ctxPayload.Body).not.toContain("Project Memory")
+      expect(dispatchCall.ctxPayload.Body).not.toContain("Project memory")
     })
   })
 

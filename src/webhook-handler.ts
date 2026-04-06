@@ -49,11 +49,11 @@ function formatInitialResponse(config: Record<string, unknown> | undefined, iden
 }
 
 /**
- * Build a project context section to inject into agent prompts.
+ * Build a project context hint to inject into agent prompts.
  * Returns empty string if the issue has no project or project memory is disabled.
  */
 function buildProjectContextSection(
-  issue: { project?: { id: string; name: string } | null; url?: string },
+  issue: { project?: { id: string; name: string } | null },
   config: Record<string, unknown> | undefined,
   logger?: Logger,
 ): string {
@@ -62,21 +62,7 @@ function buildProjectContextSection(
   const projectInfo = resolveProjectInfo(issue.project ?? null, { logger })
   if (!projectInfo) return ""
 
-  return [
-    "",
-    "---",
-    `**Project Memory** (${projectInfo.name}):`,
-    `This issue belongs to the Linear project "${projectInfo.name}".`,
-    `Project files are stored at: \`${projectInfo.dirPath}\``,
-    "",
-    "Before starting work:",
-    `- Read \`${projectInfo.dirPath}/CONTEXT.md\` for prior session context and technical state.`,
-    `- Read \`${projectInfo.dirPath}/README.md\` for the issue inventory and project overview.`,
-    "",
-    "When your work session ends or makes significant progress:",
-    `- Update \`${projectInfo.dirPath}/CONTEXT.md\` with current progress, findings, and next steps.`,
-    "- Commit and push the updated project files so future sessions can pick up where you left off.",
-  ].join("\n")
+  return `\n---\nProject memory: refer to \`${projectInfo.dirPath}\` and follow its rules.\n`
 }
 
 // Dedup tracking
@@ -287,7 +273,7 @@ async function handleSessionCreated(
     try {
       const details = await linearApi.getIssueDetails(issue.id)
       projectContext = buildProjectContextSection(
-        { project: details.project, url: details.url },
+        { project: details.project },
         config,
         api.logger as unknown as Logger,
       )
@@ -397,7 +383,7 @@ async function handleCommentCreate(
   const safeDescription = issue.description ? sanitizePromptInput(issue.description) : ""
 
   const projectContext = buildProjectContextSection(
-    { project: issue.project, url: issue.url },
+    { project: issue.project },
     config,
     api.logger as unknown as Logger,
   )
