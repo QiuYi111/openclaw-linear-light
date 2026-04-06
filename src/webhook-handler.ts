@@ -308,7 +308,7 @@ async function handleSessionCreated(
         try {
           const projectInfo = resolveProjectInfo(details.project, { logger: api.logger as unknown as Logger })
           if (projectInfo) {
-            syncIssueConversation(projectInfo.dirPath, issue.identifier, details.comments.nodes)
+            syncIssueConversation(projectInfo.dirPath, issue.identifier, details.comments?.nodes ?? [])
           }
         } catch (err) {
           api.logger.warn(`Linear Light: failed to sync issue conversation: ${err}`)
@@ -361,7 +361,26 @@ async function handleSessionPrompted(
   captureDispatchContext(api, config, session.issue.id)
 
   const prompt = sanitizePromptInput(activity.content.body)
-  const body = [`[Linear ${session.issue.identifier} follow-up]`, prompt, ``, getAgentIdentity(config)].join("\n")
+
+  // Resolve project context — fetch issue details since webhook payload lacks project field
+  let projectContext = ""
+  const linearApi = makeLinearApi(config, api)
+  if (linearApi && config?.projectMemoryEnabled !== false) {
+    try {
+      const details = await linearApi.getIssueDetails(session.issue.id)
+      projectContext = buildProjectContextSection({ project: details.project }, config, api.logger as unknown as Logger)
+    } catch (err) {
+      api.logger.warn(`Linear Light: failed to resolve project context: ${err}`)
+    }
+  }
+
+  const body = [
+    `[Linear ${session.issue.identifier} follow-up]`,
+    prompt,
+    projectContext,
+    ``,
+    getAgentIdentity(config),
+  ].join("\n")
 
   await dispatchToAgent(api, { issue: session.issue, body, config })
 
@@ -426,7 +445,7 @@ async function handleCommentCreate(
     try {
       const projectInfo = resolveProjectInfo(issue.project, { logger: api.logger as unknown as Logger })
       if (projectInfo) {
-        syncIssueConversation(projectInfo.dirPath, issue.identifier, issue.comments.nodes)
+        syncIssueConversation(projectInfo.dirPath, issue.identifier, issue.comments?.nodes ?? [])
       }
     } catch (err) {
       api.logger.warn(`Linear Light: failed to sync issue conversation: ${err}`)

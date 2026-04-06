@@ -15,22 +15,39 @@
 
 import { existsSync, mkdirSync, renameSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 
 import type { Logger } from "./linear-api.js"
 
 const PROJECTS_DIR = join(homedir(), ".openclaw", "plugins", "linear-light", "projects")
 
 /**
- * Convert a Linear project name to a URL-safe directory slug.
- * e.g. "EWL" → "ewl", "My Project" → "my-project", "API v2" → "api-v2"
+ * Convert a Linear project name and id to a unique, URL-safe directory slug.
+ * Includes a short hash of the project id to prevent collisions between
+ * projects whose names slugify to the same string (e.g. "A/B" and "AB").
+ * e.g. ("My Project", "abc123") → "my-project-a1b2c3"
  */
-export function slugifyProjectName(name: string): string {
-  return name
+export function slugifyProjectName(name: string, projectId?: string): string {
+  const nameSlug = name
     .toLowerCase()
     .trim()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
+
+  if (!nameSlug) return projectId ? `proj-${shortHash(projectId)}` : ""
+
+  if (!projectId) return nameSlug
+
+  return `${nameSlug}-${shortHash(projectId)}`
+}
+
+/** Short deterministic hash from a string (first 6 hex chars of simple hash). */
+function shortHash(str: string): string {
+  let hash = 0
+  for (let i = 0; i < str.length; i++) {
+    hash = ((hash << 5) - hash + str.charCodeAt(i)) | 0
+  }
+  return Math.abs(hash).toString(16).padStart(6, "0").slice(0, 6)
 }
 
 /**
@@ -47,9 +64,9 @@ export function getProjectDir(slug: string): string {
  */
 export function ensureProjectDir(
   projectName: string,
-  opts?: { logger?: Logger; projectUrl?: string },
+  opts?: { logger?: Logger; projectUrl?: string; projectId?: string },
 ): { dirPath: string; slug: string } {
-  const slug = slugifyProjectName(projectName)
+  const slug = slugifyProjectName(projectName, opts?.projectId)
   const dirPath = getProjectDir(slug)
 
   if (!existsSync(dirPath)) {
@@ -84,7 +101,7 @@ export function resolveProjectInfo(
 ): { dirPath: string; slug: string; id: string; name: string } | null {
   if (!(project?.id && project?.name)) return null
 
-  const { dirPath, slug } = ensureProjectDir(project.name, opts)
+  const { dirPath, slug } = ensureProjectDir(project.name, { ...opts, projectId: project.id })
   return { id: project.id, name: project.name, slug, dirPath }
 }
 
@@ -200,7 +217,7 @@ function buildContext(projectName: string): string {
  * Atomic write-then-rename to prevent corruption.
  */
 function atomicWrite(filePath: string, content: string): void {
-  const dir = filePath.substring(0, filePath.lastIndexOf("/"))
+  const dir = dirname(filePath)
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true, mode: 0o700 })
   }

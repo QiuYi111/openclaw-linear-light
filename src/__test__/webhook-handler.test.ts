@@ -183,6 +183,7 @@ describe("handleWebhook", () => {
       title: "Test",
       description: null,
       url: "https://linear.app/test/ENG-42",
+      comments: { nodes: [] },
     })
     mockRuntime.channel.routing.resolveAgentRoute.mockReturnValue({
       agentId: "agent-main",
@@ -1087,6 +1088,7 @@ describe("handleWebhook", () => {
         description: null,
         url: "https://linear.app/test/ENG-42",
         project: { id: "proj-1", name: "My Project" },
+        comments: { nodes: [] },
       })
 
       const payload = uniqueCreated()
@@ -1130,6 +1132,61 @@ describe("handleWebhook", () => {
       expect(mockLinearApi.getIssueDetails).not.toHaveBeenCalled()
     })
 
+    it("includes project context in session prompted when issue has a project", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi({ accessToken: "lin_test_token" })
+
+      mockLinearApi.getIssueDetails.mockReset()
+      mockLinearApi.getIssueDetails.mockResolvedValue({
+        id: "issue-prompted-proj",
+        identifier: "ENG-50",
+        title: "Prompted Project Test",
+        description: null,
+        url: "https://linear.app/test/ENG-50",
+        project: { id: "proj-3", name: "Frontend" },
+        comments: { nodes: [] },
+      })
+
+      const payload = uniquePrompted()
+      const { req, res } = makeSignedReq(payload, SECRET)
+
+      await handleWebhook(api, req, res)
+
+      expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
+      const dispatchCall = mockDispatchInboundReplyWithBase.mock.calls[0][0]
+      expect(dispatchCall.ctxPayload.Body).toContain("Project memory")
+      expect(dispatchCall.ctxPayload.Body).toContain("AGENTS.md")
+    })
+
+    it("omits project context in session prompted when projectMemoryEnabled is false", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi({ accessToken: "lin_test_token", projectMemoryEnabled: false })
+
+      const payload = uniquePrompted()
+      const { req, res } = makeSignedReq(payload, SECRET)
+
+      await handleWebhook(api, req, res)
+
+      const dispatchCall = mockDispatchInboundReplyWithBase.mock.calls[0][0]
+      expect(dispatchCall.ctxPayload.Body).not.toContain("Project memory")
+    })
+
+    it("gracefully handles getIssueDetails failure for project context in prompted", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi({ accessToken: "lin_test_token" })
+
+      mockLinearApi.getIssueDetails.mockReset()
+      mockLinearApi.getIssueDetails.mockRejectedValue(new Error("network error"))
+
+      const payload = uniquePrompted()
+      const { req, res } = makeSignedReq(payload, SECRET)
+
+      await handleWebhook(api, req, res)
+
+      expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
+      expect(mockLogger.warn).toHaveBeenCalledWith(expect.stringContaining("failed to resolve project context"))
+    })
+
     it("includes project context in comment create fallback", async () => {
       const { handleWebhook } = await import("../webhook-handler.js")
       const api = makeApi({ accessToken: "lin_test_token" })
@@ -1143,6 +1200,7 @@ describe("handleWebhook", () => {
         description: "Test project in comment fallback",
         url: "https://linear.app/test/ENG-99",
         project: { id: "proj-2", name: "Backend API" },
+        comments: { nodes: [] },
       })
 
       const payload = {
@@ -1201,6 +1259,7 @@ describe("handleWebhook", () => {
         description: null,
         url: "https://linear.app/test/ENG-42",
         project: { id: "proj-1", name: "My Project" },
+        comments: { nodes: [] },
       })
 
       mockDispatchInboundReplyWithBase.mockClear()

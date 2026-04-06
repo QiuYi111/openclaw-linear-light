@@ -46,6 +46,25 @@ describe("project-store", () => {
       const { slugifyProjectName } = await import("../api/project-store.js")
       expect(slugifyProjectName("!!! ???")).toBe("")
     })
+
+    it("appends project id hash when id is provided", async () => {
+      const { slugifyProjectName } = await import("../api/project-store.js")
+      const result = slugifyProjectName("My Project", "abc123")
+      expect(result).toMatch(/^my-project-[a-f0-9]{6}$/)
+    })
+
+    it("produces different slugs for colliding names with different ids", async () => {
+      const { slugifyProjectName } = await import("../api/project-store.js")
+      const slug1 = slugifyProjectName("A/B Project", "proj-aaa")
+      const slug2 = slugifyProjectName("AB Project", "proj-bbb")
+      expect(slug1).not.toBe(slug2)
+    })
+
+    it("falls back to proj-<hash> for empty-name projects with id", async () => {
+      const { slugifyProjectName } = await import("../api/project-store.js")
+      const result = slugifyProjectName("!!!", "abc123")
+      expect(result).toMatch(/^proj-[a-f0-9]{6}$/)
+    })
   })
 
   describe("getProjectDir", () => {
@@ -63,7 +82,7 @@ describe("project-store", () => {
 
       const result = ensureProjectDir("Test Project")
 
-      expect(result.slug).toBe("test-project")
+      expect(result.slug).toMatch(/^test-project$/)
       expect(result.dirPath).toMatch(/projects\/test-project$/)
       expect(mockMkdirSync).toHaveBeenCalledWith(result.dirPath, { recursive: true, mode: 0o700 })
       // 3 file writes: AGENTS.md, README.md, Context.md
@@ -88,7 +107,7 @@ describe("project-store", () => {
 
       const result = ensureProjectDir("Existing Project")
 
-      expect(result.slug).toBe("existing-project")
+      expect(result.slug).toMatch(/^existing-project$/)
       expect(mockMkdirSync).not.toHaveBeenCalled()
       expect(mockWriteFileSync).not.toHaveBeenCalled()
     })
@@ -225,8 +244,8 @@ describe("project-store", () => {
       expect(result).toEqual({
         id: "proj-1",
         name: "My Project",
-        slug: "my-project",
-        dirPath: expect.stringMatching(/projects\/my-project$/),
+        slug: expect.stringMatching(/^my-project-[a-f0-9]{6}$/),
+        dirPath: expect.stringMatching(/projects\/my-project-[a-f0-9]{6}$/),
       })
     })
   })
