@@ -14,11 +14,18 @@ const mockLogger = {
 
 const mockDispatchInboundReplyWithBase = vi.fn().mockResolvedValue(undefined)
 
+const mockExistsSync = vi.fn().mockReturnValue(true)
+const mockMkdirSync = vi.fn()
+const mockRenameSync = vi.fn()
+
 vi.mock("node:fs", () => ({
+  existsSync: mockExistsSync,
+  mkdirSync: mockMkdirSync,
   readFileSync: vi.fn(() => {
     throw new Error("no file")
   }),
   writeFileSync: vi.fn(),
+  renameSync: mockRenameSync,
 }))
 
 vi.mock("openclaw/plugin-sdk", () => ({
@@ -185,6 +192,7 @@ describe("handleWebhook", () => {
     })
     mockRuntime.channel.session.resolveStorePath.mockReturnValue("/tmp/store/agent-main")
     mockRuntime.channel.reply.finalizeInboundContext.mockImplementation((ctx: any) => ctx)
+    mockExistsSync.mockReturnValue(true)
   })
 
   afterEach(() => {
@@ -1060,6 +1068,121 @@ describe("handleWebhook", () => {
       expect(mockDispatchInboundReplyWithBase).toHaveBeenCalled()
       expect(mockLinearApi.getIssueDetails).toHaveBeenCalledWith(commentIssueId)
       expect(mockLinearApi.updateIssueState).toHaveBeenCalledWith(commentIssueId, "In Progress")
+    })
+  })
+
+  // -----------------------------------------------------------------------
+  describe("project context injection", () => {
+    // -----------------------------------------------------------------------
+
+    it("includes project context in session created when issue has a project", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi({ accessToken: "lin_test_token" })
+
+      mockLinearApi.getIssueDetails.mockReset()
+      mockLinearApi.getIssueDetails.mockResolvedValue({
+        id: "issue-1",
+        identifier: "ENG-42",
+        title: "Test",
+        description: null,
+        url: "https://linear.app/test/ENG-42",
+        project: { id: "proj-1", name: "My Project" },
+      })
+
+      const payload = uniqueCreated()
+      const { req, res } = makeSignedReq(payload, SECRET)
+
+      await handleWebhook(api, req, res)
+
+      expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
+      const dispatchCall = mockDispatchInboundReplyWithBase.mock.calls[0][0]
+      expect(dispatchCall.ctxPayload.Body).toContain("Project Memory")
+      expect(dispatchCall.ctxPayload.Body).toContain("My Project")
+      expect(dispatchCall.ctxPayload.Body).toContain("CONTEXT.md")
+      expect(dispatchCall.ctxPayload.Body).toContain("README.md")
+    })
+
+    it("omits project context when issue has no project", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi({ accessToken: "lin_test_token" })
+
+      // Default mock has no project field — project should be omitted
+      const payload = uniqueCreated()
+      const { req, res } = makeSignedReq(payload, SECRET)
+
+      await handleWebhook(api, req, res)
+
+      const dispatchCall = mockDispatchInboundReplyWithBase.mock.calls[0][0]
+      expect(dispatchCall.ctxPayload.Body).not.toContain("Project Memory")
+    })
+
+    it("omits project context when projectMemoryEnabled is false", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi({ accessToken: "lin_test_token", projectMemoryEnabled: false })
+
+      const payload = uniqueCreated()
+      const { req, res } = makeSignedReq(payload, SECRET)
+
+      await handleWebhook(api, req, res)
+
+      const dispatchCall = mockDispatchInboundReplyWithBase.mock.calls[0][0]
+      expect(dispatchCall.ctxPayload.Body).not.toContain("Project Memory")
+      // getIssueDetails should not be called for project context when disabled
+      expect(mockLinearApi.getIssueDetails).not.toHaveBeenCalled()
+    })
+
+    it("includes project context in comment create fallback", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi({ accessToken: "lin_test_token" })
+
+      const commentIssueId = `issue-proj-${uid}`
+      mockLinearApi.getIssueDetails.mockReset()
+      mockLinearApi.getIssueDetails.mockResolvedValue({
+        id: commentIssueId,
+        identifier: "ENG-99",
+        title: "Comment Project Test",
+        description: "Test project in comment fallback",
+        url: "https://linear.app/test/ENG-99",
+        project: { id: "proj-2", name: "Backend API" },
+      })
+
+      const payload = {
+        type: "Comment",
+        action: "create",
+        createdAt: `2026-04-01T20:00:${String(uid++).padStart(2, "0")}.000Z`,
+        data: {
+          id: `comment-proj-${uid}`,
+          body: "@Linus check this project",
+          issue: { id: commentIssueId },
+        },
+      }
+      const { req, res } = makeSignedReq(payload, SECRET)
+
+      await handleWebhook(api, req, res)
+
+      expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
+      const dispatchCall = mockDispatchInboundReplyWithBase.mock.calls[0][0]
+      expect(dispatchCall.ctxPayload.Body).toContain("Project Memory")
+      expect(dispatchCall.ctxPayload.Body).toContain("Backend API")
+    })
+
+    it("gracefully handles getIssueDetails failure for project context", async () => {
+      const { handleWebhook } = await import("../webhook-handler.js")
+      const api = makeApi({ accessToken: "lin_test_token" })
+
+      mockLinearApi.getIssueDetails.mockReset()
+      mockLinearApi.getIssueDetails.mockRejectedValue(new Error("network error"))
+
+      const payload = uniqueCreated()
+      const { req, res } = makeSignedReq(payload, SECRET)
+
+      await handleWebhook(api, req, res)
+
+      // Should still succeed — project context is best-effort
+      expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
+      expect(mockLogger.warn).toHaveBeenCalledWith(expect.stringContaining("failed to resolve project context"))
+      const dispatchCall = mockDispatchInboundReplyWithBase.mock.calls[0][0]
+      expect(dispatchCall.ctxPayload.Body).not.toContain("Project Memory")
     })
   })
 
