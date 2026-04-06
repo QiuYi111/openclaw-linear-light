@@ -57,7 +57,7 @@ describe("project-store", () => {
   })
 
   describe("ensureProjectDir", () => {
-    it("creates directory and files when they do not exist", async () => {
+    it("creates directory, all files, and issues/ when they do not exist", async () => {
       mockExistsSync.mockReturnValue(false)
       const { ensureProjectDir } = await import("../api/project-store.js")
 
@@ -65,13 +65,21 @@ describe("project-store", () => {
 
       expect(result.slug).toBe("test-project")
       expect(result.dirPath).toMatch(/projects\/test-project$/)
-      expect(mockMkdirSync).toHaveBeenCalledWith(result.dirPath, {
-        recursive: true,
-        mode: 0o700,
-      })
-      // Should create README.md and CONTEXT.md (2 writes + 2 renames)
-      expect(mockWriteFileSync).toHaveBeenCalledTimes(2)
-      expect(mockRenameSync).toHaveBeenCalledTimes(2)
+      expect(mockMkdirSync).toHaveBeenCalledWith(result.dirPath, { recursive: true, mode: 0o700 })
+      // 3 file writes: AGENTS.md, README.md, Context.md
+      expect(mockWriteFileSync).toHaveBeenCalledTimes(3)
+      expect(mockRenameSync).toHaveBeenCalledTimes(3)
+    })
+
+    it("creates issues/ subdirectory", async () => {
+      mockExistsSync.mockReturnValue(false)
+      const { ensureProjectDir } = await import("../api/project-store.js")
+
+      ensureProjectDir("Test Project")
+
+      const issuesMkdir = mockMkdirSync.mock.calls.find(([path]) => (path as string).endsWith("issues"))
+      expect(issuesMkdir).toBeDefined()
+      expect(issuesMkdir?.[1]).toEqual({ mode: 0o700 })
     })
 
     it("skips creation when directory already exists", async () => {
@@ -85,13 +93,43 @@ describe("project-store", () => {
       expect(mockWriteFileSync).not.toHaveBeenCalled()
     })
 
+    it("creates AGENTS.md with project rules and directory structure", async () => {
+      mockExistsSync.mockReturnValue(false)
+      const { ensureProjectDir } = await import("../api/project-store.js")
+
+      ensureProjectDir("My Proj")
+
+      const agentsCall = mockWriteFileSync.mock.calls.find(([path]) => (path as string).endsWith("AGENTS.md.tmp"))
+      expect(agentsCall).toBeDefined()
+      const content = agentsCall?.[1] as string
+      expect(content).toContain("Agent Rules")
+      expect(content).toContain("README.md")
+      expect(content).toContain("Context.md")
+      expect(content).toContain("issues/")
+      expect(content).toContain("AGENTS.md")
+    })
+
+    it("creates README.md with purpose and background sections", async () => {
+      mockExistsSync.mockReturnValue(false)
+      const { ensureProjectDir } = await import("../api/project-store.js")
+
+      ensureProjectDir("My Proj")
+
+      const readmeCall = mockWriteFileSync.mock.calls.find(([path]) => (path as string).endsWith("README.md.tmp"))
+      expect(readmeCall).toBeDefined()
+      const content = readmeCall?.[1] as string
+      expect(content).toContain("Purpose")
+      expect(content).toContain("Background")
+      // Should NOT contain the old issue table
+      expect(content).not.toContain("Issues")
+      expect(content).not.toContain("| Identifier |")
+    })
+
     it("includes project URL in README when provided", async () => {
       mockExistsSync.mockReturnValue(false)
       const { ensureProjectDir } = await import("../api/project-store.js")
 
-      ensureProjectDir("My Proj", {
-        projectUrl: "https://linear.app/test/project/my-proj",
-      })
+      ensureProjectDir("My Proj", { projectUrl: "https://linear.app/test/project/my-proj" })
 
       const readmeCall = mockWriteFileSync.mock.calls.find(([path]) => (path as string).endsWith("README.md.tmp"))
       expect(readmeCall).toBeDefined()
@@ -107,6 +145,21 @@ describe("project-store", () => {
       const readmeCall = mockWriteFileSync.mock.calls.find(([path]) => (path as string).endsWith("README.md.tmp"))
       expect(readmeCall).toBeDefined()
       expect(readmeCall?.[1]).not.toContain("Linear:")
+    })
+
+    it("creates Context.md with refined context sections", async () => {
+      mockExistsSync.mockReturnValue(false)
+      const { ensureProjectDir } = await import("../api/project-store.js")
+
+      ensureProjectDir("My Proj")
+
+      const contextCall = mockWriteFileSync.mock.calls.find(([path]) => (path as string).endsWith("Context.md.tmp"))
+      expect(contextCall).toBeDefined()
+      const content = contextCall?.[1] as string
+      expect(content).toContain("Context")
+      expect(content).toContain("Current State")
+      expect(content).toContain("Key Findings")
+      expect(content).toContain("Architecture Decisions")
     })
 
     it("logs creation when logger is provided", async () => {
@@ -130,8 +183,7 @@ describe("project-store", () => {
         expect(tmpPath).toMatch(/\.tmp$/)
         expect((opts as { mode: number }).mode).toBe(0o600)
       }
-      // Each write should be followed by a rename
-      expect(mockRenameSync).toHaveBeenCalledTimes(2)
+      expect(mockRenameSync).toHaveBeenCalledTimes(3)
     })
   })
 

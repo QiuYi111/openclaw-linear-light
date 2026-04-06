@@ -5,8 +5,10 @@
  * ~/.openclaw/plugins/linear-light/projects/<slug>/
  *
  * Each project directory contains:
- * - README.md  — project overview with issue inventory
- * - CONTEXT.md — session continuity context for the agent
+ * - AGENTS.md   — project rules and instructions (agent must read first)
+ * - README.md   — project purpose and background
+ * - Context.md  — refined/extracted context for session continuity
+ * - issues/     — per-issue conversation records
  *
  * Follows the same atomic write-then-rename pattern as oauth-store.ts.
  */
@@ -54,13 +56,17 @@ export function ensureProjectDir(
     mkdirSync(dirPath, { recursive: true, mode: 0o700 })
     opts?.logger?.info(`Linear Light: created project directory ${dirPath}`)
 
-    // Initialize README.md
-    const readme = buildReadme(projectName, opts?.projectUrl)
-    atomicWrite(join(dirPath, "README.md"), readme)
+    // Initialize AGENTS.md (project rules — agent must read first)
+    atomicWrite(join(dirPath, "AGENTS.md"), buildAgentsMd(projectName))
 
-    // Initialize CONTEXT.md
-    const context = buildContext(projectName)
-    atomicWrite(join(dirPath, "CONTEXT.md"), context)
+    // Initialize README.md (project purpose and background)
+    atomicWrite(join(dirPath, "README.md"), buildReadme(projectName, opts?.projectUrl))
+
+    // Initialize Context.md (refined/extracted context)
+    atomicWrite(join(dirPath, "Context.md"), buildContext(projectName))
+
+    // Create issues/ directory
+    mkdirSync(join(dirPath, "issues"), { mode: 0o700 })
 
     opts?.logger?.info(`Linear Light: initialized project files for "${projectName}"`)
   }
@@ -83,7 +89,33 @@ export function resolveProjectInfo(
 }
 
 /**
- * Build the default README.md content for a new project.
+ * Build AGENTS.md — the project rules and instructions file.
+ * The agent must read this file first; it defines the conventions for all other files.
+ */
+function buildAgentsMd(projectName: string): string {
+  return [
+    `# ${projectName} — Agent Rules`,
+    "",
+    "Read this file first. It defines the rules for working with this project.",
+    "",
+    "## Project Directory Structure",
+    "",
+    "- `README.md` — Project purpose and background.",
+    "- `Context.md` — Refined/extracted context: technical state, key findings, architecture decisions. Update this as work progresses.",
+    "- `issues/` — Per-issue conversation records. Each issue gets `issues/<Identifier>.md`. Pull content from Linear API (comments), do not write manually.",
+    "- `AGENTS.md` — This file. Contains project rules and user instructions.",
+    "",
+    "## Instructions",
+    "",
+    "- Always read `Context.md` before starting work to understand current state.",
+    "- Update `Context.md` when making significant progress or discoveries.",
+    "- For issue conversation history, use the Linear API to pull comments into `issues/<Identifier>.md`.",
+    "",
+  ].join("\n")
+}
+
+/**
+ * Build README.md — project purpose and background.
  */
 function buildReadme(projectName: string, projectUrl?: string): string {
   const lines = [
@@ -91,31 +123,35 @@ function buildReadme(projectName: string, projectUrl?: string): string {
     "",
     projectUrl ? `Linear: ${projectUrl}` : "",
     "",
-    "## Issues",
+    "## Purpose",
     "",
-    "| Identifier | Title | Status | Priority |",
-    "| --- | --- | --- | --- |",
+    "",
+    "## Background",
+    "",
     "",
   ]
   return `${lines.filter(Boolean).join("\n")}\n`
 }
 
 /**
- * Build the default CONTEXT.md content for a new project.
+ * Build Context.md — refined/extracted context for session continuity.
  */
 function buildContext(projectName: string): string {
   return [
-    `# ${projectName} — Session Context`,
+    `# ${projectName} — Context`,
     "",
-    "This file stores technical context for session continuity.",
-    "The agent should update this file as work progresses.",
+    "Refined/extracted context for session continuity.",
+    "Update this file as work progresses.",
     "",
     "## Current State",
     "",
     "- Status: Initialized",
     "- Last updated: (none)",
     "",
-    "## Notes",
+    "## Key Findings",
+    "",
+    "",
+    "## Architecture Decisions",
     "",
     "",
   ].join("\n")

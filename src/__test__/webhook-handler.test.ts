@@ -1097,7 +1097,8 @@ describe("handleWebhook", () => {
       expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
       const dispatchCall = mockDispatchInboundReplyWithBase.mock.calls[0][0]
       expect(dispatchCall.ctxPayload.Body).toContain("Project memory")
-      expect(dispatchCall.ctxPayload.Body).toContain("follow its rules")
+      expect(dispatchCall.ctxPayload.Body).toContain("AGENTS.md")
+      expect(dispatchCall.ctxPayload.Body).toContain("follow its rules strictly")
     })
 
     it("omits project context when issue has no project", async () => {
@@ -1180,6 +1181,54 @@ describe("handleWebhook", () => {
       expect(mockLogger.warn).toHaveBeenCalledWith(expect.stringContaining("failed to resolve project context"))
       const dispatchCall = mockDispatchInboundReplyWithBase.mock.calls[0][0]
       expect(dispatchCall.ctxPayload.Body).not.toContain("Project memory")
+    })
+
+    it("includes project update instructions in completion loop prompt", async () => {
+      const { handleWebhook, dispatchCompletionPrompt } = await import("../webhook-handler.js")
+      const api = makeApi({ accessToken: "lin_test_token" })
+
+      // First, handle a webhook to capture dispatch context
+      const payload = uniqueCreated()
+      const { req, res } = makeSignedReq(payload, SECRET)
+      await handleWebhook(api, req, res)
+
+      // Set up getIssueDetails to return project info for completion loop
+      mockLinearApi.getIssueDetails.mockReset()
+      mockLinearApi.getIssueDetails.mockResolvedValue({
+        id: payload.agentSession.issue.id,
+        identifier: "ENG-42",
+        title: "Test",
+        description: null,
+        url: "https://linear.app/test/ENG-42",
+        project: { id: "proj-1", name: "My Project" },
+      })
+
+      mockDispatchInboundReplyWithBase.mockClear()
+
+      await dispatchCompletionPrompt(payload.agentSession.issue.id, "ENG-42", "check status")
+
+      expect(mockDispatchInboundReplyWithBase).toHaveBeenCalledTimes(1)
+      const dispatchCall = mockDispatchInboundReplyWithBase.mock.calls[0][0]
+      expect(dispatchCall.ctxPayload.Body).toContain("Context.md")
+      expect(dispatchCall.ctxPayload.Body).toContain("issues/ENG-42.md")
+      expect(dispatchCall.ctxPayload.Body).toContain("Linear API")
+    })
+
+    it("omits project update instructions when projectMemoryEnabled is false", async () => {
+      const { handleWebhook, dispatchCompletionPrompt } = await import("../webhook-handler.js")
+      const api = makeApi({ accessToken: "lin_test_token", projectMemoryEnabled: false })
+
+      const payload = uniqueCreated()
+      const { req, res } = makeSignedReq(payload, SECRET)
+      await handleWebhook(api, req, res)
+
+      mockDispatchInboundReplyWithBase.mockClear()
+
+      await dispatchCompletionPrompt(payload.agentSession.issue.id, "ENG-42", "check status")
+
+      expect(mockDispatchInboundReplyWithBase).toHaveBeenCalledTimes(1)
+      const dispatchCall = mockDispatchInboundReplyWithBase.mock.calls[0][0]
+      expect(dispatchCall.ctxPayload.Body).not.toContain("Context.md")
     })
   })
 

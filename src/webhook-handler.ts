@@ -62,7 +62,40 @@ function buildProjectContextSection(
   const projectInfo = resolveProjectInfo(issue.project ?? null, { logger })
   if (!projectInfo) return ""
 
-  return `\n---\nProject memory: refer to \`${projectInfo.dirPath}\` and follow its rules.\n`
+  return `\n---\nProject memory: read \`${projectInfo.dirPath}/AGENTS.md\` first and follow its rules strictly.\n`
+}
+
+/**
+ * Build project persistence update instructions for completion loop prompts.
+ * Returns empty string if project memory is disabled or no project found.
+ */
+async function buildCompletionProjectHint(
+  issueId: string,
+  issueIdentifier: string,
+  config: Record<string, unknown> | undefined,
+  logger?: Logger,
+): Promise<string> {
+  if (config?.projectMemoryEnabled === false) return ""
+
+  const linearApi = getLinearApi()
+  if (!linearApi) return ""
+
+  try {
+    const details = await linearApi.getIssueDetails(issueId)
+    const projectInfo = resolveProjectInfo(details.project, { logger })
+    if (!projectInfo) return ""
+
+    return [
+      "",
+      "---",
+      "Before responding, update the project memory files:",
+      `- Update \`${projectInfo.dirPath}/Context.md\` with current progress and findings.`,
+      `- Update \`${projectInfo.dirPath}/issues/${issueIdentifier}.md\` with conversation history (pull comments via Linear API, do not write manually).`,
+    ].join("\n")
+  } catch (err) {
+    logger?.warn(`Linear Light: failed to resolve project context for completion: ${err}`)
+    return ""
+  }
 }
 
 // Dedup tracking
@@ -551,8 +584,10 @@ export async function dispatchCompletionPrompt(
     return
   }
 
+  const projectHint = await buildCompletionProjectHint(issueId, issueIdentifier, ctx.config, _logger)
+
   const issue = { id: issueId, identifier: issueIdentifier, title: "", description: null, url: "" }
-  const body = [`[Linear ${issueIdentifier} completion check]`, prompt, ``, getAgentIdentity(ctx.config)].join("\n")
+  const body = [`[Linear ${issueIdentifier} completion check]`, prompt, projectHint, ``, getAgentIdentity(ctx.config)].join("\n")
 
   await dispatchToAgent(ctx.api, { issue, body, config: ctx.config })
 }
