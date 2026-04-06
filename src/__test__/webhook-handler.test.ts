@@ -1210,8 +1210,8 @@ describe("handleWebhook", () => {
       expect(mockDispatchInboundReplyWithBase).toHaveBeenCalledTimes(1)
       const dispatchCall = mockDispatchInboundReplyWithBase.mock.calls[0][0]
       expect(dispatchCall.ctxPayload.Body).toContain("Context.md")
-      expect(dispatchCall.ctxPayload.Body).toContain("issues/ENG-42.md")
-      expect(dispatchCall.ctxPayload.Body).toContain("Linear API")
+      expect(dispatchCall.ctxPayload.Body).not.toContain("issues/")
+      expect(dispatchCall.ctxPayload.Body).not.toContain("Linear API")
     })
 
     it("omits project update instructions when projectMemoryEnabled is false", async () => {

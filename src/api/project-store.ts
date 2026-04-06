@@ -7,8 +7,8 @@
  * Each project directory contains:
  * - AGENTS.md   — project rules and instructions (agent must read first)
  * - README.md   — project purpose and background
- * - Context.md  — refined/extracted context for session continuity
- * - issues/     — per-issue conversation records
+ * - Context.md  — refined/extracted context for session continuity (written by agent)
+ * - issues/     — per-issue conversation records (auto-managed by plugin)
  *
  * Follows the same atomic write-then-rename pattern as oauth-store.ts.
  */
@@ -62,10 +62,10 @@ export function ensureProjectDir(
     // Initialize README.md (project purpose and background)
     atomicWrite(join(dirPath, "README.md"), buildReadme(projectName, opts?.projectUrl))
 
-    // Initialize Context.md (refined/extracted context)
+    // Initialize Context.md (refined/extracted context — written by agent)
     atomicWrite(join(dirPath, "Context.md"), buildContext(projectName))
 
-    // Create issues/ directory
+    // Create issues/ directory (auto-managed by plugin)
     mkdirSync(join(dirPath, "issues"), { mode: 0o700 })
 
     opts?.logger?.info(`Linear Light: initialized project files for "${projectName}"`)
@@ -88,6 +88,45 @@ export function resolveProjectInfo(
   return { id: project.id, name: project.name, slug, dirPath }
 }
 
+/** Shape of a single comment from Linear API. */
+interface IssueComment {
+  user: { name: string | null } | null
+  body: string
+  createdAt: string
+}
+
+/**
+ * Sync an issue's conversation to the project's issues/ directory.
+ * Pulls comments from Linear API and writes them to `issues/<identifier>.md`.
+ * Called automatically by the plugin — the agent should NOT write to issues/ manually.
+ */
+export function syncIssueConversation(
+  projectDirPath: string,
+  issueIdentifier: string,
+  comments: IssueComment[],
+  opts?: { logger?: Logger },
+): void {
+  const issuesDir = join(projectDirPath, "issues")
+  if (!existsSync(issuesDir)) {
+    mkdirSync(issuesDir, { recursive: true, mode: 0o700 })
+  }
+
+  const lines = [`# ${issueIdentifier} — Conversation`, ""]
+
+  for (const comment of comments) {
+    const author = comment.user?.name ?? "Unknown"
+    const time = comment.createdAt ? new Date(comment.createdAt).toISOString().replace("T", " ").split(".")[0] : ""
+    lines.push(`## ${author}${time ? ` (${time})` : ""}`, "", comment.body, "")
+  }
+
+  if (comments.length === 0) {
+    lines.push("_No comments yet._", "")
+  }
+
+  atomicWrite(join(issuesDir, `${issueIdentifier}.md`), lines.join("\n"))
+  opts?.logger?.info(`Linear Light: synced ${comments.length} comments for ${issueIdentifier}`)
+}
+
 /**
  * Build AGENTS.md — the project rules and instructions file.
  * The agent must read this file first; it defines the conventions for all other files.
@@ -101,15 +140,15 @@ function buildAgentsMd(projectName: string): string {
     "## Project Directory Structure",
     "",
     "- `README.md` — Project purpose and background.",
-    "- `Context.md` — Refined/extracted context: technical state, key findings, architecture decisions. Update this as work progresses.",
-    "- `issues/` — Per-issue conversation records. Each issue gets `issues/<Identifier>.md`. Pull content from Linear API (comments), do not write manually.",
+    "- `Context.md` — Refined/extracted context: technical state, key findings, architecture decisions. **You should update this file** as work progresses.",
+    "- `issues/` — Per-issue conversation records, auto-managed by the plugin. **Do not write to this directory manually.**",
     "- `AGENTS.md` — This file. Contains project rules and user instructions.",
     "",
     "## Instructions",
     "",
     "- Always read `Context.md` before starting work to understand current state.",
     "- Update `Context.md` when making significant progress or discoveries.",
-    "- For issue conversation history, use the Linear API to pull comments into `issues/<Identifier>.md`.",
+    "- Do not modify files in `issues/` — the plugin syncs them automatically from Linear.",
     "",
   ].join("\n")
 }

@@ -230,4 +230,78 @@ describe("project-store", () => {
       })
     })
   })
+
+  describe("syncIssueConversation", () => {
+    it("writes issue comments to issues/<identifier>.md", async () => {
+      mockExistsSync.mockReturnValue(true)
+      const { syncIssueConversation } = await import("../api/project-store.js")
+
+      const comments = [
+        { user: { name: "Alice" }, body: "Please fix this bug.", createdAt: "2026-04-01T10:00:00.000Z" },
+        { user: { name: "Bob" }, body: "Done, see PR #5.", createdAt: "2026-04-01T11:00:00.000Z" },
+      ]
+
+      syncIssueConversation("/projects/my-project", "ENG-42", comments)
+
+      const writeCall = mockWriteFileSync.mock.calls.find(([path]) => (path as string).endsWith("issues/ENG-42.md.tmp"))
+      expect(writeCall).toBeDefined()
+      const content = writeCall?.[1] as string
+      expect(content).toContain("# ENG-42 — Conversation")
+      expect(content).toContain("Alice")
+      expect(content).toContain("Please fix this bug.")
+      expect(content).toContain("Bob")
+      expect(content).toContain("Done, see PR #5.")
+    })
+
+    it("writes placeholder when no comments", async () => {
+      mockExistsSync.mockReturnValue(true)
+      const { syncIssueConversation } = await import("../api/project-store.js")
+
+      syncIssueConversation("/projects/my-project", "ENG-99", [])
+
+      const writeCall = mockWriteFileSync.mock.calls.find(([path]) => (path as string).endsWith("issues/ENG-99.md.tmp"))
+      expect(writeCall).toBeDefined()
+      expect(writeCall?.[1]).toContain("No comments yet")
+    })
+
+    it("creates issues/ directory if it does not exist", async () => {
+      mockExistsSync.mockReturnValue(false)
+      const { syncIssueConversation } = await import("../api/project-store.js")
+
+      syncIssueConversation("/projects/my-project", "ENG-42", [])
+
+      expect(mockMkdirSync).toHaveBeenCalledWith(
+        expect.stringContaining("issues"),
+        expect.objectContaining({ mode: 0o700 }),
+      )
+    })
+
+    it("handles null user name gracefully", async () => {
+      mockExistsSync.mockReturnValue(true)
+      const { syncIssueConversation } = await import("../api/project-store.js")
+
+      syncIssueConversation("/projects/my-project", "ENG-42", [
+        { user: null, body: "Anonymous comment", createdAt: "2026-04-01T10:00:00.000Z" },
+      ])
+
+      const writeCall = mockWriteFileSync.mock.calls.find(([path]) => (path as string).endsWith("issues/ENG-42.md.tmp"))
+      expect(writeCall?.[1]).toContain("Unknown")
+      expect(writeCall?.[1]).toContain("Anonymous comment")
+    })
+
+    it("logs sync when logger is provided", async () => {
+      mockExistsSync.mockReturnValue(true)
+      const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+      const { syncIssueConversation } = await import("../api/project-store.js")
+
+      syncIssueConversation(
+        "/projects/my-project",
+        "ENG-42",
+        [{ user: { name: "A" }, body: "Hi", createdAt: "2026-04-01T10:00:00.000Z" }],
+        { logger },
+      )
+
+      expect(logger.info).toHaveBeenCalledWith(expect.stringContaining("synced 1 comments for ENG-42"))
+    })
+  })
 })
