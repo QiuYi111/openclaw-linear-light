@@ -176,7 +176,8 @@ describe("plugin register()", () => {
     mod.default(api)
 
     const toolCall = api.registerTool.mock.calls.find((c: any) => c[0].name === "project_memory_save")
-    const tool = toolCall![0]
+    if (!toolCall) throw new Error("tool not registered")
+    const tool = toolCall[0]
     const result = await tool.execute("tc", {
       issueId: "nonexistent-id",
       filename: "CONTEXT.md",
@@ -209,7 +210,8 @@ describe("plugin register()", () => {
     mod.default(api)
 
     const toolCall = api.registerTool.mock.calls.find((c: any) => c[0].name === "project_memory_save")
-    const tool = toolCall![0]
+    if (!toolCall) throw new Error("tool not registered")
+    const tool = toolCall[0]
     const result = await tool.execute("tc", {
       issueId: "test-id",
       filename: "CONTEXT.md",
