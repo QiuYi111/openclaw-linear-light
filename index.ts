@@ -24,6 +24,7 @@ import type { Logger } from "./src/api/linear-api.js"
 import { LinearAgentApi, resolveLinearToken } from "./src/api/linear-api.js"
 import { setLoopStoreLogger } from "./src/api/loop-store.js"
 import { setOauthStateStoreLogger } from "./src/api/oauth-state-store.js"
+import { resolveProjectInfo, saveProjectFile, setProjectStoreConfig } from "./src/api/project-store.js"
 import {
   resumePersistedLoops,
   setCompletionLoopConfig,
@@ -147,6 +148,9 @@ export default function register(api: OpenClawPluginApi) {
     logger: api.logger,
   })
   setLinearApi(sharedLinearApi)
+
+  // Initialize project store config (base path, git, etc.)
+  setProjectStoreConfig(config)
 
   // Register webhook endpoint
   api.registerHttpRoute({
@@ -378,6 +382,64 @@ function createLinearTools(api: OpenClawPluginApi): AnyAgentTool[] {
             content: [{ type: "text", text: results.length ? results.join("\n") : "No issues found" }],
             details: {},
           }
+        } catch (err) {
+          return { content: [{ type: "text", text: `Failed: ${err}` }], details: { status: "failed" } }
+        }
+      },
+    },
+    {
+      name: "project_memory_save",
+      label: "Project Memory Save",
+      description:
+        "Save/append content to a project memory file (CONTEXT.md, PLAN.md, or README.md). " +
+        "Also commits and pushes to git. Use this at the end of your session to persist work.",
+      parameters: {
+        type: "object" as const,
+        properties: {
+          issueId: { type: "string", description: "The Linear issue UUID" },
+          filename: {
+            type: "string",
+            description: "Target file: CONTEXT.md, PLAN.md, or README.md",
+            enum: ["CONTEXT.md", "PLAN.md", "README.md"],
+          },
+          content: { type: "string", description: "Full new content of the file (replaces existing)" },
+          mode: {
+            type: "string",
+            description: "Write mode: 'replace' overwrites, 'append' adds to end",
+            enum: ["replace", "append"],
+          },
+        },
+        required: ["issueId", "filename", "content"],
+      },
+      execute: async (
+        _tc: string,
+        {
+          issueId,
+          filename,
+          content,
+          mode = "replace",
+        }: { issueId: string; filename: string; content: string; mode?: string },
+      ) => {
+        try {
+          const issue = await linearApi.getIssueDetails(issueId)
+          const projectInfo = resolveProjectInfo(issue.project, {
+            logger: api.logger as unknown as Logger,
+          })
+          if (!projectInfo) {
+            return {
+              content: [{ type: "text", text: "Issue has no project — cannot save to project memory." }],
+              details: {},
+            }
+          }
+
+          const result = saveProjectFile(
+            projectInfo.dirPath,
+            filename,
+            content,
+            mode as "replace" | "append",
+            api.logger as unknown as Logger,
+          )
+          return { content: [{ type: "text", text: result.message }], details: {} }
         } catch (err) {
           return { content: [{ type: "text", text: `Failed: ${err}` }], details: { status: "failed" } }
         }

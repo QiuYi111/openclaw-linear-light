@@ -7,6 +7,8 @@
  */
 
 import { createHmac, timingSafeEqual } from "node:crypto"
+import { existsSync } from "node:fs"
+import { join } from "node:path"
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk"
 import {
   // @ts-expect-error — exported from local plugin-sdk but may not be in CI's version
@@ -16,6 +18,7 @@ import {
 import { agentSessionMap, identifierSessionMap } from "../index.js"
 import type { LinearAgentApi, Logger } from "./api/linear-api.js"
 import { resolveLinearToken } from "./api/linear-api.js"
+import { resolveProjectInfo, syncIssueConversation } from "./api/project-store.js"
 import { setCompletionLoopConfig, startCompletionLoop } from "./completion-loop.js"
 import { getLinearApi, getLinearRuntime } from "./runtime.js"
 import type {
@@ -45,6 +48,70 @@ function getAgentIdentity(config: Record<string, unknown> | undefined): string {
 function formatInitialResponse(config: Record<string, unknown> | undefined, identifier: string, title: string): string {
   const template = (config?.initialResponseTemplate as string) || DEFAULT_INITIAL_RESPONSE_TEMPLATE
   return template.replace("{identifier}", identifier).replace("{title}", title)
+}
+
+/**
+ * Build a project context hint to inject into agent prompts.
+ * Returns empty string if the issue has no project or project memory is disabled.
+ */
+function buildProjectContextSection(
+  issue: { project?: { id: string; name: string } | null },
+  config: Record<string, unknown> | undefined,
+  logger?: Logger,
+): string {
+  if (config?.projectMemoryEnabled === false) return ""
+
+  const projectInfo = resolveProjectInfo(issue.project ?? null, { logger })
+  if (!projectInfo) return ""
+
+  const files: string[] = []
+  for (const name of ["AGENTS.md", "Context.md", "README.md"]) {
+    if (existsSync(join(projectInfo.dirPath, name))) files.push(name)
+  }
+
+  const lines = [
+    `\n---\n📁 Project Memory for ${projectInfo.name}`,
+    `\nProject directory: \`${projectInfo.dirPath}\``,
+    `\n**Before starting work, read these files to restore context:**`,
+    ...files.map((f) => `- \`${f}\``),
+    `\n**When your session completes or you make significant progress:**`,
+    `1. Update \`${projectInfo.dirPath}/Context.md\` with current state, key decisions, and findings`,
+    `2. Update \`${projectInfo.dirPath}/README.md\` with progress and next steps`,
+    `3. Use \`project_memory_save\` tool to persist, or run \`cd ${projectInfo.dirPath} && git add -A && git commit -m "update: <summary>" && git push\``,
+    `\n`,
+  ]
+
+  return lines.join("\n")
+}
+
+/**
+ * Build project persistence update instructions for completion loop prompts.
+ * Returns empty string if project memory is disabled or no project found.
+ */
+async function buildCompletionProjectHint(
+  issueId: string,
+  config: Record<string, unknown> | undefined,
+  logger?: Logger,
+): Promise<string> {
+  if (config?.projectMemoryEnabled === false) return ""
+
+  const linearApi = getLinearApi()
+  if (!linearApi) return ""
+
+  try {
+    const details = await linearApi.getIssueDetails(issueId)
+    const projectInfo = resolveProjectInfo(details.project, { logger })
+    if (!projectInfo) return ""
+
+    return [
+      "",
+      "---",
+      `Update \`${projectInfo.dirPath}/Context.md\` with current progress and findings before responding.`,
+    ].join("\n")
+  } catch (err) {
+    logger?.warn(`Linear Light: failed to resolve project context for completion: ${err}`)
+    return ""
+  }
 }
 
 // Dedup tracking
@@ -249,11 +316,34 @@ async function handleSessionCreated(
   const safeDescription = issue.description ? sanitizePromptInput(issue.description) : ""
   const sanitizedPrompt = sanitizePromptInput(prompt)
 
+  // Resolve project context — fetch issue details since webhook payload lacks project field
+  let projectContext = ""
+  if (linearApi && config?.projectMemoryEnabled !== false) {
+    try {
+      const details = await linearApi.getIssueDetails(issue.id)
+      projectContext = buildProjectContextSection({ project: details.project }, config, api.logger as unknown as Logger)
+      // Auto-sync issue conversation to project's issues/ directory
+      if (details.project?.id) {
+        try {
+          const projectInfo = resolveProjectInfo(details.project, { logger: api.logger as unknown as Logger })
+          if (projectInfo) {
+            syncIssueConversation(projectInfo.dirPath, issue.identifier, details.comments?.nodes ?? [])
+          }
+        } catch (err) {
+          api.logger.warn(`Linear Light: failed to sync issue conversation: ${err}`)
+        }
+      }
+    } catch (err) {
+      api.logger.warn(`Linear Light: failed to resolve project context: ${err}`)
+    }
+  }
+
   const body = [
     `[Linear Issue ${issue.identifier}] ${safeTitle}`,
     safeDescription ? `\n---\nDescription:\n${safeDescription}` : "",
     isMentionTriggered ? `\n---\n**User comment:**\n${sanitizedPrompt}` : "",
     `\n---\nIssue URL: ${issue.url}`,
+    projectContext,
     ``,
     getAgentIdentity(config),
   ].join("\n")
@@ -290,7 +380,26 @@ async function handleSessionPrompted(
   captureDispatchContext(api, config, session.issue.id)
 
   const prompt = sanitizePromptInput(activity.content.body)
-  const body = [`[Linear ${session.issue.identifier} follow-up]`, prompt, ``, getAgentIdentity(config)].join("\n")
+
+  // Resolve project context — fetch issue details since webhook payload lacks project field
+  let projectContext = ""
+  const linearApi = makeLinearApi(config, api)
+  if (linearApi && config?.projectMemoryEnabled !== false) {
+    try {
+      const details = await linearApi.getIssueDetails(session.issue.id)
+      projectContext = buildProjectContextSection({ project: details.project }, config, api.logger as unknown as Logger)
+    } catch (err) {
+      api.logger.warn(`Linear Light: failed to resolve project context: ${err}`)
+    }
+  }
+
+  const body = [
+    `[Linear ${session.issue.identifier} follow-up]`,
+    prompt,
+    projectContext,
+    ``,
+    getAgentIdentity(config),
+  ].join("\n")
 
   await dispatchToAgent(api, { issue: session.issue, body, config })
 
@@ -348,11 +457,26 @@ async function handleCommentCreate(
   const safeTitle = sanitizePromptInput(issue.title, 200)
   const safeDescription = issue.description ? sanitizePromptInput(issue.description) : ""
 
+  const projectContext = buildProjectContextSection({ project: issue.project }, config, api.logger as unknown as Logger)
+
+  // Auto-sync issue conversation to project's issues/ directory
+  if (issue.project?.id) {
+    try {
+      const projectInfo = resolveProjectInfo(issue.project, { logger: api.logger as unknown as Logger })
+      if (projectInfo) {
+        syncIssueConversation(projectInfo.dirPath, issue.identifier, issue.comments?.nodes ?? [])
+      }
+    } catch (err) {
+      api.logger.warn(`Linear Light: failed to sync issue conversation: ${err}`)
+    }
+  }
+
   const body = [
     `[Linear Issue ${issue.identifier}] ${safeTitle}`,
     safeDescription ? `\n---\nDescription:\n${safeDescription}` : "",
     `\n---\n**User comment:**\n${sanitizedPrompt}`,
     `\n---\nIssue URL: ${issue.url}`,
+    projectContext,
     ``,
     getAgentIdentity(config),
   ].join("\n")
@@ -472,10 +596,7 @@ let _logger: Logger = console as unknown as Logger
  * Store a fallback api/config for use when per-issue context is unavailable
  * (e.g. after gateway restart when completion loops resume from persistence).
  */
-export function setFallbackDispatchContext(
-  api: OpenClawPluginApi,
-  config: Record<string, unknown> | undefined,
-): void {
+export function setFallbackDispatchContext(api: OpenClawPluginApi, config: Record<string, unknown> | undefined): void {
   _fallbackContext = { api, config }
 }
 
@@ -510,8 +631,16 @@ export async function dispatchCompletionPrompt(
     return
   }
 
+  const projectHint = await buildCompletionProjectHint(issueId, ctx.config, _logger)
+
   const issue = { id: issueId, identifier: issueIdentifier, title: "", description: null, url: "" }
-  const body = [`[Linear ${issueIdentifier} completion check]`, prompt, ``, getAgentIdentity(ctx.config)].join("\n")
+  const body = [
+    `[Linear ${issueIdentifier} completion check]`,
+    prompt,
+    projectHint,
+    ``,
+    getAgentIdentity(ctx.config),
+  ].join("\n")
 
   await dispatchToAgent(ctx.api, { issue, body, config: ctx.config })
 }

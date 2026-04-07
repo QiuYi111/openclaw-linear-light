@@ -18,6 +18,15 @@ export interface LinearWebhookIssue {
   description?: string | null
   url: string
   team?: { id: string; key: string; name: string }
+  project?: { id: string; name: string } | null
+}
+
+/** Resolved project info from Linear API. */
+export interface ProjectInfo {
+  id: string
+  name: string
+  slug: string
+  dirPath: string
 }
 
 export interface LinearWebhookAgentSession {
