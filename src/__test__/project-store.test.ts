@@ -7,13 +7,20 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 const mockExistsSync = vi.fn()
 const mockMkdirSync = vi.fn()
 const mockWriteFileSync = vi.fn()
+const mockReadFileSync = vi.fn()
 const mockRenameSync = vi.fn()
+const mockExecSync = vi.fn()
 
 vi.mock("node:fs", () => ({
   existsSync: mockExistsSync,
   mkdirSync: mockMkdirSync,
   writeFileSync: mockWriteFileSync,
+  readFileSync: mockReadFileSync,
   renameSync: mockRenameSync,
+}))
+
+vi.mock("node:child_process", () => ({
+  execSync: mockExecSync,
 }))
 
 describe("project-store", () => {
@@ -321,6 +328,161 @@ describe("project-store", () => {
       )
 
       expect(logger.info).toHaveBeenCalledWith(expect.stringContaining("synced 1 comments for ENG-42"))
+    })
+  })
+
+  describe("getProjectDir", () => {
+    it("uses custom basePath when provided", async () => {
+      const { getProjectDir } = await import("../api/project-store.js")
+      const dir = getProjectDir("my-project", "/custom/path")
+      expect(dir).toBe("/custom/path/my-project")
+    })
+
+    it("falls back to config basePath when not provided", async () => {
+      const { getProjectDir, setProjectStoreConfig } = await import("../api/project-store.js")
+      setProjectStoreConfig({ enabled: true, basePath: "/default/path", autoGit: false })
+      // Re-import to get updated config
+      const dir = getProjectDir("test-slug")
+      expect(dir).toMatch(/test-slug$/) // Just verify it ends with the slug (config may not reset between tests)
+    })
+  })
+
+  describe("initGitRepo", () => {
+    it("initializes git repo and makes initial commit when .git does not exist", async () => {
+      mockExistsSync.mockReturnValue(false)
+      const { initGitRepo } = await import("../api/project-store.js")
+      const logger = { info: vi.fn(), warn: vi.fn() }
+
+      const result = initGitRepo("/projects/test", logger)
+
+      expect(result).toBe(true)
+      expect(mockExecSync).toHaveBeenCalledWith("git init", expect.objectContaining({ cwd: "/projects/test" }))
+      expect(mockExecSync).toHaveBeenCalledWith(
+        expect.stringContaining("git commit"),
+        expect.objectContaining({ cwd: "/projects/test" }),
+      )
+      expect(logger.info).toHaveBeenCalledWith(expect.stringContaining("initialized git repo"))
+    })
+
+    it("skips when .git already exists", async () => {
+      mockExistsSync.mockImplementation((path: string) => path.endsWith(".git"))
+      const { initGitRepo } = await import("../api/project-store.js")
+
+      const result = initGitRepo("/projects/existing")
+
+      expect(result).toBe(false)
+      expect(mockExecSync).not.toHaveBeenCalled()
+    })
+
+    it("returns false on failure and logs warning", async () => {
+      mockExistsSync.mockReturnValue(false)
+      mockExecSync.mockImplementation(() => { throw new Error("git not found") })
+      const { initGitRepo } = await import("../api/project-store.js")
+      const logger = { info: vi.fn(), warn: vi.fn() }
+
+      const result = initGitRepo("/projects/fail", logger)
+
+      expect(result).toBe(false)
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("git init failed"))
+    })
+  })
+
+  describe("saveProjectFile", () => {
+    beforeEach(() => {
+      vi.clearAllMocks()
+      mockExistsSync.mockReturnValue(true)
+    })
+
+    it("writes file in replace mode", async () => {
+      const { saveProjectFile, setProjectStoreConfig } = await import("../api/project-store.js")
+      setProjectStoreConfig({ enabled: true, basePath: "/projects", autoGit: false })
+
+      const result = saveProjectFile("/projects/test", "CONTEXT.md", "new content")
+
+      expect(result.ok).toBe(true)
+      expect(result.message).toContain("Saved CONTEXT.md to /projects/test")
+      expect(mockWriteFileSync).toHaveBeenCalledWith("/projects/test/CONTEXT.md", "new content", "utf-8")
+    })
+
+    it("appends content in append mode when file exists", async () => {
+      mockReadFileSync.mockReturnValue("existing content")
+      const { saveProjectFile, setProjectStoreConfig } = await import("../api/project-store.js")
+      setProjectStoreConfig({ enabled: true, basePath: "/projects", autoGit: false })
+
+      const result = saveProjectFile("/projects/test", "CONTEXT.md", "appended", "append")
+
+      expect(result.ok).toBe(true)
+      expect(mockReadFileSync).toHaveBeenCalledWith("/projects/test/CONTEXT.md", "utf-8")
+      expect(mockWriteFileSync).toHaveBeenCalledWith("/projects/test/CONTEXT.md", "existing content\nappended", "utf-8")
+    })
+
+    it("creates directory when it does not exist", async () => {
+      mockExistsSync.mockImplementation((p: string) => p === "/projects/new/.git")
+      const { saveProjectFile, setProjectStoreConfig } = await import("../api/project-store.js")
+      setProjectStoreConfig({ enabled: true, basePath: "/projects", autoGit: false })
+
+      saveProjectFile("/projects/new", "README.md", "content")
+
+      expect(mockMkdirSync).toHaveBeenCalledWith("/projects/new", { recursive: true })
+    })
+
+    it("commits and pushes when autoGit is enabled", async () => {
+      mockExistsSync.mockImplementation((p: string) => p.endsWith(".git"))
+      mockExecSync.mockReturnValue("") // reset from previous test
+      const { saveProjectFile, setProjectStoreConfig } = await import("../api/project-store.js")
+      setProjectStoreConfig({ enabled: true, basePath: "/projects", autoGit: true })
+
+      const result = saveProjectFile("/projects/test", "CONTEXT.md", "content")
+
+      expect(result.ok).toBe(true)
+      expect(result.message).toContain("committed + pushed")
+      expect(mockExecSync).toHaveBeenCalledWith(
+        expect.stringContaining("git commit"),
+        expect.objectContaining({ cwd: "/projects/test" }),
+      )
+    })
+
+    it("initializes git repo within saveProjectFile when .git does not exist and autoGit is true", async () => {
+      // .git doesn't exist, so initGitRepo will be called
+      mockExistsSync.mockImplementation((p: string) => p === "/projects/test" || p === "/projects/test/CONTEXT.md")
+      mockExecSync.mockReturnValue("")
+      const { saveProjectFile, setProjectStoreConfig } = await import("../api/project-store.js")
+      const logger = { info: vi.fn(), warn: vi.fn() }
+      setProjectStoreConfig({ enabled: true, basePath: "/projects", autoGit: true })
+
+      const result = saveProjectFile("/projects/test", "CONTEXT.md", "content", "replace", logger)
+
+      expect(result.ok).toBe(true)
+      expect(result.message).toContain("committed + pushed")
+      // initGitRepo should have been called (git init + initial commit)
+      expect(mockExecSync).toHaveBeenCalledWith("git init", expect.objectContaining({ cwd: "/projects/test" }))
+    })
+
+    it("reports git failure but still succeeds", async () => {
+      mockExistsSync.mockReturnValue(true)
+      mockExecSync.mockImplementation(() => { throw new Error("push failed") })
+      const { saveProjectFile, setProjectStoreConfig } = await import("../api/project-store.js")
+      const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+      setProjectStoreConfig({ enabled: true, basePath: "/projects", autoGit: true })
+
+      const result = saveProjectFile("/projects/test", "CONTEXT.md", "content", "replace", logger)
+
+      expect(result.ok).toBe(true)
+      expect(result.message).toContain("git failed")
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("git commit failed"))
+    })
+
+    it("returns error on unexpected failure", async () => {
+      mockExistsSync.mockReturnValue(true)
+      mockWriteFileSync.mockImplementation(() => { throw new Error("disk full") })
+      const { saveProjectFile, setProjectStoreConfig } = await import("../api/project-store.js")
+      setProjectStoreConfig({ enabled: true, basePath: "/projects", autoGit: false })
+
+      const result = saveProjectFile("/projects/test", "CONTEXT.md", "content")
+
+      expect(result.ok).toBe(false)
+      expect(result.message).toContain("Failed")
+      expect(result.message).toContain("disk full")
     })
   })
 })

@@ -11,8 +11,12 @@ const mockLogger = {
   debug: vi.fn(),
 }
 
-// Mock fs for token resolution
+// Mock fs for token resolution and project-store
+const mockExistsSync = vi.fn(() => true)
+const mockMkdirSync = vi.fn()
 vi.mock("node:fs", () => ({
+  existsSync: mockExistsSync,
+  mkdirSync: mockMkdirSync,
   readFileSync: vi.fn(() => {
     throw new Error("no file")
   }),
@@ -50,6 +54,10 @@ vi.mock("openclaw/plugin-sdk", () => ({
     setRuntime: vi.fn(),
     getRuntime: vi.fn(() => null),
   })),
+}))
+
+vi.mock("node:child_process", () => ({
+  execSync: vi.fn(),
 }))
 
 // Mock fetch for Linear API calls
@@ -158,6 +166,57 @@ describe("plugin register()", () => {
     expect(toolNames).toContain("linear_search_issues")
     expect(toolNames).toContain("project_memory_save")
     expect(toolNames).toHaveLength(4)
+  })
+
+  it("project_memory_save tool returns error when getIssueDetails fails", async () => {
+    // getIssueDetails will fail because the real API token is used.
+    // This tests the catch block in the tool execute.
+    const mod = await import("../../index.js")
+    const api = makeApi()
+    mod.default(api)
+
+    const toolCall = api.registerTool.mock.calls.find((c: any) => c[0].name === "project_memory_save")
+    const tool = toolCall![0]
+    const result = await tool.execute("tc", {
+      issueId: "nonexistent-id",
+      filename: "CONTEXT.md",
+      content: "# Test",
+    })
+
+    // Should fail gracefully since the API call won't succeed
+    expect(result.details).toEqual({ status: "failed" })
+  })
+
+  it("project_memory_save tool succeeds when issue has project", async () => {
+    // Mock fetch to return a valid GraphQL response with a project
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () =>
+        Promise.resolve({
+          data: {
+            issue: {
+              id: "test-id",
+              identifier: "ENG-42",
+              title: "Test",
+              project: { id: "proj-1", name: "MyProject" },
+            },
+          },
+        }),
+    })
+
+    const mod = await import("../../index.js")
+    const api = makeApi()
+    mod.default(api)
+
+    const toolCall = api.registerTool.mock.calls.find((c: any) => c[0].name === "project_memory_save")
+    const tool = toolCall![0]
+    const result = await tool.execute("tc", {
+      issueId: "test-id",
+      filename: "CONTEXT.md",
+      content: "# Test context",
+    })
+
+    expect(result.content[0].text).toContain("Saved CONTEXT.md")
   })
 
   it("registers channel plugin with correct id and capabilities", async () => {
