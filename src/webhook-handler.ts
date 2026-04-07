@@ -8,8 +8,8 @@
 
 import { createHmac, timingSafeEqual } from "node:crypto"
 import { existsSync } from "node:fs"
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk"
 import { join } from "node:path"
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk"
 import {
   // @ts-expect-error — exported from local plugin-sdk but may not be in CI's version
   dispatchInboundReplyWithBase,

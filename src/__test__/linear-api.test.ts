@@ -13,6 +13,8 @@ const mockReadFileSync = vi.fn()
 const mockWriteFileSync = vi.fn()
 const mockRenameSync = vi.fn()
 vi.mock("node:fs", () => ({
+  existsSync: vi.fn(() => false),
+  mkdirSync: vi.fn(),
   readFileSync: mockReadFileSync,
   writeFileSync: mockWriteFileSync,
   renameSync: mockRenameSync,

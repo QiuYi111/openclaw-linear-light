@@ -24,11 +24,7 @@ import type { Logger } from "./src/api/linear-api.js"
 import { LinearAgentApi, resolveLinearToken } from "./src/api/linear-api.js"
 import { setLoopStoreLogger } from "./src/api/loop-store.js"
 import { setOauthStateStoreLogger } from "./src/api/oauth-state-store.js"
-import {
-  resolveProjectInfo,
-  saveProjectFile,
-  setProjectStoreConfig,
-} from "./src/api/project-store.js"
+import { resolveProjectInfo, saveProjectFile, setProjectStoreConfig } from "./src/api/project-store.js"
 import {
   resumePersistedLoops,
   setCompletionLoopConfig,
@@ -430,7 +426,10 @@ function createLinearTools(api: OpenClawPluginApi): AnyAgentTool[] {
             logger: api.logger as unknown as Logger,
           })
           if (!projectInfo) {
-            return { content: [{ type: "text", text: "Issue has no project — cannot save to project memory." }], details: {} }
+            return {
+              content: [{ type: "text", text: "Issue has no project — cannot save to project memory." }],
+              details: {},
+            }
           }
 
           const result = saveProjectFile(
