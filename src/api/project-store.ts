@@ -1,8 +1,8 @@
 /**
  * Project-based memory persistence store.
  *
- * Creates and manages per-project directories under
- * ~/.openclaw/plugins/linear-light/projects/<slug>/
+ * Creates and manages per-project directories under the configured base path
+ * (default: ~/clawd/projects/<slug>/).
  *
  * Each project directory contains:
  * - AGENTS.md   — project rules and instructions (agent must read first)
@@ -13,13 +13,41 @@
  * Follows the same atomic write-then-rename pattern as oauth-store.ts.
  */
 
-import { existsSync, mkdirSync, renameSync, writeFileSync } from "node:fs"
+import { execSync } from "node:child_process"
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
-import { dirname, join } from "node:path"
+import { dirname, join, resolve } from "node:path"
 
 import type { Logger } from "./linear-api.js"
 
-const PROJECTS_DIR = join(homedir(), ".openclaw", "plugins", "linear-light", "projects")
+// ---------------------------------------------------------------------------
+// Configuration
+// ---------------------------------------------------------------------------
+
+export interface ProjectStoreConfig {
+  enabled: boolean
+  basePath: string // e.g., "/Users/jingyi/clawd/projects"
+  autoGit: boolean // auto git init / commit / push on dir creation
+}
+
+let _config: ProjectStoreConfig = {
+  enabled: true,
+  basePath: resolve(homedir(), "clawd", "projects"),
+  autoGit: true,
+}
+
+export function setProjectStoreConfig(pluginConfig: Record<string, unknown> | undefined): void {
+  const cfg = pluginConfig ?? {}
+  _config = {
+    enabled: cfg.projectMemoryEnabled !== false,
+    basePath: (cfg.projectMemoryBasePath as string) || resolve(homedir(), "clawd", "projects"),
+    autoGit: cfg.projectMemoryAutoGit !== false,
+  }
+}
+
+export function getProjectStoreConfig(): ProjectStoreConfig {
+  return _config
+}
 
 /**
  * Convert a Linear project name and id to a unique, URL-safe directory slug.
@@ -53,8 +81,8 @@ function shortHash(str: string): string {
 /**
  * Get the directory path for a project slug.
  */
-export function getProjectDir(slug: string): string {
-  return join(PROJECTS_DIR, slug)
+export function getProjectDir(slug: string, basePath?: string): string {
+  return join(basePath ?? _config.basePath, slug)
 }
 
 /**
@@ -65,7 +93,7 @@ export function getProjectDir(slug: string): string {
 export function ensureProjectDir(
   projectName: string,
   opts?: { logger?: Logger; projectUrl?: string; projectId?: string },
-): { dirPath: string; slug: string } {
+): { dirPath: string; slug: string; created: boolean } {
   const slug = slugifyProjectName(projectName, opts?.projectId)
   const dirPath = getProjectDir(slug)
 
@@ -86,9 +114,16 @@ export function ensureProjectDir(
     mkdirSync(join(dirPath, "issues"), { mode: 0o700 })
 
     opts?.logger?.info(`Linear Light: initialized project files for "${projectName}"`)
+
+    // Auto-init git repo if configured
+    if (_config.autoGit) {
+      initGitRepo(dirPath, opts?.logger)
+    }
+
+    return { dirPath, slug, created: true }
   }
 
-  return { dirPath, slug }
+  return { dirPath, slug, created: false }
 }
 
 /**
@@ -211,6 +246,79 @@ function buildContext(projectName: string): string {
     "",
     "",
   ].join("\n")
+}
+
+/**
+ * Initialize a git repo in the project directory if it doesn't exist.
+ */
+export function initGitRepo(dirPath: string, logger?: Logger): boolean {
+  const gitDir = join(dirPath, ".git")
+  if (existsSync(gitDir)) return false
+
+  try {
+    execSync("git init", { cwd: dirPath, stdio: "pipe" })
+    // Create initial commit
+    execSync("git add -A && git commit -m 'init: project directory'", {
+      cwd: dirPath,
+      stdio: "pipe",
+      timeout: 30_000,
+    })
+    logger?.info(`Linear Light: initialized git repo in ${dirPath}`)
+    return true
+  } catch (err) {
+    logger?.warn(`Linear Light: git init failed for ${dirPath}: ${err}`)
+    return false
+  }
+}
+
+/**
+ * Save/append content to a file in the project directory and optionally git commit + push.
+ * Used by the project_memory_save tool.
+ */
+export function saveProjectFile(
+  dirPath: string,
+  filename: string,
+  content: string,
+  mode: "replace" | "append" = "replace",
+  logger?: Logger,
+): { ok: boolean; message: string } {
+  try {
+    if (!existsSync(dirPath)) {
+      mkdirSync(dirPath, { recursive: true })
+    }
+
+    const filePath = join(dirPath, filename)
+    if (mode === "append" && existsSync(filePath)) {
+      const existing = readFileSync(filePath, "utf-8")
+      writeFileSync(filePath, `${existing}\n${content}`, "utf-8")
+    } else {
+      writeFileSync(filePath, content, "utf-8")
+    }
+
+    // Git commit + push if configured
+    let gitMsg = ""
+    if (_config.autoGit) {
+      try {
+        if (!existsSync(join(dirPath, ".git"))) {
+          initGitRepo(dirPath, logger)
+        }
+        const commitMsg = `update ${filename}`
+        execSync(`git add -A && git commit -m ${JSON.stringify(commitMsg)} && git push`, {
+          cwd: dirPath,
+          stdio: "pipe",
+          timeout: 30_000,
+        })
+        gitMsg = " (committed + pushed)"
+      } catch (err) {
+        gitMsg = ` (git failed: ${err instanceof Error ? err.message : String(err)})`
+        logger?.warn(`Linear Light: git commit failed: ${err}`)
+      }
+    }
+
+    return { ok: true, message: `Saved ${filename} to ${dirPath}${gitMsg}` }
+  } catch (err) {
+    return { ok: false, message: `Failed: ${err instanceof Error ? err.message : String(err)}` }
+  }
 }
 
 /**

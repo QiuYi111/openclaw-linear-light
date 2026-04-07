@@ -7,7 +7,9 @@
  */
 
 import { createHmac, timingSafeEqual } from "node:crypto"
+import { existsSync } from "node:fs"
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk"
+import { join } from "node:path"
 import {
   // @ts-expect-error — exported from local plugin-sdk but may not be in CI's version
   dispatchInboundReplyWithBase,
@@ -62,7 +64,24 @@ function buildProjectContextSection(
   const projectInfo = resolveProjectInfo(issue.project ?? null, { logger })
   if (!projectInfo) return ""
 
-  return `\n---\nProject memory: read \`${projectInfo.dirPath}/AGENTS.md\` first and follow its rules strictly.\n`
+  const files: string[] = []
+  for (const name of ["AGENTS.md", "Context.md", "README.md"]) {
+    if (existsSync(join(projectInfo.dirPath, name))) files.push(name)
+  }
+
+  const lines = [
+    `\n---\n📁 Project Memory for ${projectInfo.name}`,
+    `\nProject directory: \`${projectInfo.dirPath}\``,
+    `\n**Before starting work, read these files to restore context:**`,
+    ...files.map((f) => `- \`${f}\``),
+    `\n**When your session completes or you make significant progress:**`,
+    `1. Update \`${projectInfo.dirPath}/Context.md\` with current state, key decisions, and findings`,
+    `2. Update \`${projectInfo.dirPath}/README.md\` with progress and next steps`,
+    `3. Use \`project_memory_save\` tool to persist, or run \`cd ${projectInfo.dirPath} && git add -A && git commit -m "update: <summary>" && git push\``,
+    `\n`,
+  ]
+
+  return lines.join("\n")
 }
 
 /**

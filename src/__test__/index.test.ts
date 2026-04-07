@@ -146,7 +146,7 @@ describe("plugin register()", () => {
     expect(hookNames).toContain("agent_end")
   })
 
-  it("registers 3 tools: linear_update_status, linear_get_issue, linear_search_issues", async () => {
+  it("registers 4 tools: linear_update_status, linear_get_issue, linear_search_issues, project_memory_save", async () => {
     const mod = await import("../../index.js")
     const api = makeApi()
 
@@ -156,7 +156,8 @@ describe("plugin register()", () => {
     expect(toolNames).toContain("linear_update_status")
     expect(toolNames).toContain("linear_get_issue")
     expect(toolNames).toContain("linear_search_issues")
-    expect(toolNames).toHaveLength(3)
+    expect(toolNames).toContain("project_memory_save")
+    expect(toolNames).toHaveLength(4)
   })
 
   it("registers channel plugin with correct id and capabilities", async () => {
