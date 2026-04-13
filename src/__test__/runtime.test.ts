@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
-vi.mock("openclaw/plugin-sdk", () => ({
+vi.mock("openclaw/plugin-sdk/runtime-store", () => ({
   createPluginRuntimeStore: vi.fn(() => ({
     setRuntime: vi.fn(),
     getRuntime: vi.fn(() => null),

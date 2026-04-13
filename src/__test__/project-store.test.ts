@@ -376,7 +376,9 @@ describe("project-store", () => {
 
     it("returns false on failure and logs warning", async () => {
       mockExistsSync.mockReturnValue(false)
-      mockExecSync.mockImplementation(() => { throw new Error("git not found") })
+      mockExecSync.mockImplementation(() => {
+        throw new Error("git not found")
+      })
       const { initGitRepo } = await import("../api/project-store.js")
       const logger = { info: vi.fn(), warn: vi.fn() }
 
@@ -460,7 +462,9 @@ describe("project-store", () => {
 
     it("reports git failure but still succeeds", async () => {
       mockExistsSync.mockReturnValue(true)
-      mockExecSync.mockImplementation(() => { throw new Error("push failed") })
+      mockExecSync.mockImplementation(() => {
+        throw new Error("push failed")
+      })
       const { saveProjectFile, setProjectStoreConfig } = await import("../api/project-store.js")
       const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
       setProjectStoreConfig({ enabled: true, basePath: "/projects", autoGit: true })
@@ -474,7 +478,9 @@ describe("project-store", () => {
 
     it("returns error on unexpected failure", async () => {
       mockExistsSync.mockReturnValue(true)
-      mockWriteFileSync.mockImplementation(() => { throw new Error("disk full") })
+      mockWriteFileSync.mockImplementation(() => {
+        throw new Error("disk full")
+      })
       const { saveProjectFile, setProjectStoreConfig } = await import("../api/project-store.js")
       setProjectStoreConfig({ enabled: true, basePath: "/projects", autoGit: false })
 
