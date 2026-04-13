@@ -48,8 +48,8 @@ vi.mock("node:crypto", () => ({
   })),
 }))
 
-// Mock openclaw/plugin-sdk for createPluginRuntimeStore (used by runtime.ts)
-vi.mock("openclaw/plugin-sdk", () => ({
+// Mock openclaw/plugin-sdk/runtime-store for createPluginRuntimeStore (used by runtime.ts)
+vi.mock("openclaw/plugin-sdk/runtime-store", () => ({
   createPluginRuntimeStore: vi.fn(() => ({
     setRuntime: vi.fn(),
     getRuntime: vi.fn(() => null),

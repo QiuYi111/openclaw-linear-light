@@ -28,8 +28,11 @@ vi.mock("node:fs", () => ({
   renameSync: mockRenameSync,
 }))
 
-vi.mock("openclaw/plugin-sdk", () => ({
+vi.mock("openclaw/plugin-sdk/inbound-reply-dispatch", () => ({
   dispatchInboundReplyWithBase: (...args: any[]) => mockDispatchInboundReplyWithBase(...args),
+}))
+
+vi.mock("openclaw/plugin-sdk/runtime-store", () => ({
   createPluginRuntimeStore: vi.fn(() => ({
     setRuntime: vi.fn(),
     getRuntime: vi.fn(() => null),
