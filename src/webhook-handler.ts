@@ -506,9 +506,7 @@ async function dispatchToAgent(
     peer: { kind: "direct", id: peerId },
   })
 
-  api.logger.info(
-    `Linear Light: route resolved: agentId=${route.agentId} sessionKey=${route.sessionKey} model=${route.model}`,
-  )
+  api.logger.info(`Linear Light: route resolved: agentId=${route.agentId} sessionKey=${route.sessionKey}`)
 
   const storePath = core.channel.session.resolveStorePath((cfg as any).session?.store, { agentId: route.agentId })
 
