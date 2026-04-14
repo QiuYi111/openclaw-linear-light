@@ -10,11 +10,8 @@ import { createHmac, timingSafeEqual } from "node:crypto"
 import { existsSync } from "node:fs"
 import { join } from "node:path"
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk"
-import {
-  // @ts-expect-error — exported from local plugin-sdk but may not be in CI's version
-  dispatchInboundReplyWithBase,
-  type OpenClawConfig,
-} from "openclaw/plugin-sdk"
+import { dispatchInboundReplyWithBase } from "openclaw/plugin-sdk/inbound-reply-dispatch"
+import type { OpenClawConfig } from "openclaw/plugin-sdk/config-runtime"
 import { agentSessionMap, identifierSessionMap } from "../index.js"
 import type { LinearAgentApi, Logger } from "./api/linear-api.js"
 import { resolveLinearToken } from "./api/linear-api.js"
@@ -511,7 +508,7 @@ async function dispatchToAgent(
   })
 
   api.logger.info(
-    `Linear Light: route resolved: agentId=${route.agentId} sessionKey=${route.sessionKey} model=${route.model}`,
+    `Linear Light: route resolved: agentId=${route.agentId} sessionKey=${route.sessionKey}`,
   )
 
   const storePath = core.channel.session.resolveStorePath((cfg as any).session?.store, { agentId: route.agentId })

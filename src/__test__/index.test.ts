@@ -48,12 +48,16 @@ vi.mock("node:crypto", () => ({
   })),
 }))
 
-// Mock openclaw/plugin-sdk for createPluginRuntimeStore (used by runtime.ts)
-vi.mock("openclaw/plugin-sdk", () => ({
+// Mock openclaw/plugin-sdk subpath imports
+vi.mock("openclaw/plugin-sdk/runtime-store", () => ({
   createPluginRuntimeStore: vi.fn(() => ({
     setRuntime: vi.fn(),
     getRuntime: vi.fn(() => null),
   })),
+}))
+
+vi.mock("openclaw/plugin-sdk/inbound-reply-dispatch", () => ({
+  dispatchInboundReplyWithBase: vi.fn(),
 }))
 
 vi.mock("node:child_process", () => ({
