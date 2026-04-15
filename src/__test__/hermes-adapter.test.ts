@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import { beforeEach, describe, expect, it, vi } from "vitest"
 
 // ---------------------------------------------------------------------------
 // Hermes adapter unit tests
@@ -15,8 +15,8 @@ const mockFetch = vi.fn()
 
 vi.stubGlobal("fetch", mockFetch)
 
-import { dispatchToHermes, validateHermesConfig } from "../hermes-adapter.js"
 import type { HermesConfig } from "../hermes-adapter.js"
+import { dispatchToHermes, validateHermesConfig } from "../hermes-adapter.js"
 
 // ---------------------------------------------------------------------------
 // validateHermesConfig
