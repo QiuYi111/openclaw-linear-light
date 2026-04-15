@@ -159,6 +159,15 @@ describe("dispatchToHermes", () => {
     expect(result.error).toContain("ECONNREFUSED")
   })
 
+  it("handles non-Error rejections", async () => {
+    mockFetch.mockRejectedValue("string error")
+
+    const result = await dispatchToHermes({ issue, body: "test", config, logger: mockLogger })
+
+    expect(result.ok).toBe(false)
+    expect(result.error).toBe("string error")
+  })
+
   it("uses default route name 'linear' when not specified", async () => {
     mockFetch.mockResolvedValue({ ok: true })
 
