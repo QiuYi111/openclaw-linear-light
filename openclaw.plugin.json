@@ -65,6 +65,38 @@
         "type": "string",
         "description": "Prompt template sent to agent on each loop tick. Supports {identifier}, {state}, {iteration} placeholders.",
         "default": "[Completion Check] The issue {identifier} is still in \"{state}\" state. Please continue working on it. If you believe the work is complete, use the linear_update_status tool to mark it as Done."
+      },
+      "dispatchMode": {
+        "type": "string",
+        "description": "Agent dispatch mode: 'openclaw' (default, uses internal agent) or 'hermes' (forwards to Hermes Agent webhook)",
+        "default": "openclaw",
+        "enum": ["openclaw", "hermes"]
+      },
+      "hermes": {
+        "type": "object",
+        "description": "Hermes Agent configuration (required when dispatchMode is 'hermes')",
+        "properties": {
+          "webhookUrl": {
+            "type": "string",
+            "description": "Hermes webhook endpoint URL (e.g. http://localhost:8644/webhooks/linear)"
+          },
+          "webhookSecret": {
+            "type": "string",
+            "description": "HMAC secret for signing payloads sent to Hermes",
+            "sensitive": true
+          },
+          "routeName": {
+            "type": "string",
+            "description": "Hermes webhook route name (default: 'linear')",
+            "default": "linear"
+          },
+          "timeoutMs": {
+            "type": "number",
+            "description": "Timeout for Hermes webhook requests in milliseconds (default: 15000)",
+            "default": 15000
+          }
+        },
+        "required": ["webhookUrl", "webhookSecret"]
       }
     }
   }

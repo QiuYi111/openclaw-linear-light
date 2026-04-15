@@ -1497,3 +1497,154 @@ describe("sanitizePromptInput", () => {
     expect(sanitizePromptInput("Hello World")).toBe("Hello World")
   })
 })
+
+// ---------------------------------------------------------------------------
+// Hermes dispatch mode integration
+// ---------------------------------------------------------------------------
+
+describe("Hermes dispatch mode", () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  const SECRET = "wh-sec...-123"
+  let uid = 9001
+
+  function makeHermesApi() {
+    return {
+      pluginConfig: {
+        enabled: true,
+        webhookSecret: SECRET,
+        mentionTrigger: "Linus",
+        autoInProgress: false,
+        dispatchMode: "hermes",
+        hermes: {
+          webhookUrl: "http://localhost:8644/webhooks",
+          webhookSecret: "hermes-secret",
+          routeName: "linear",
+        },
+      },
+      logger: mockLogger,
+      config: {},
+      runtime: mockRuntime,
+    } as any
+  }
+
+  function makeSignedReq(payload: Record<string, unknown>, secret: string) {
+    const body = JSON.stringify(payload)
+    const sig = signPayload(body, secret)
+    const chunks: Buffer[] = [Buffer.from(body)]
+    const req = {
+      headers: { "linear-signature": sig },
+      on: vi.fn((event: string, cb: (...args: any[]) => void) => {
+        if (event === "data") for (const chunk of chunks) cb(chunk)
+        if (event === "end") cb()
+      }),
+    }
+    const res = {
+      writeHead: vi.fn(),
+      end: vi.fn(),
+    }
+    return { req, res }
+  }
+
+  it("dispatches to Hermes webhook when dispatchMode is hermes", async () => {
+    const { handleWebhook } = await import("../webhook-handler.js")
+    const api = makeHermesApi()
+    const n = uid++
+    const payload = makeAgentSessionPrompted({
+      createdAt: `2099-08-01T00:00:${String(n).padStart(2, "0")}.000Z`,
+      agentSession: {
+        id: `sess-hermes-${n}`,
+        issue: {
+          id: `issue-hermes-${n}`,
+          identifier: `PER-${n}`,
+          title: `Hermes test ${n}`,
+          description: "Dispatch via Hermes",
+          url: `https://linear.app/test/issue/PER-${n}`,
+          team: { id: "team-001", key: "PER", name: "Platform" },
+        },
+      },
+      body: "@Linus please help with this issue",
+    })
+
+    mockFetch.mockResolvedValue({ ok: true })
+    const { req, res } = makeSignedReq(payload, SECRET)
+
+    await handleWebhook(api, req, res)
+
+    expect(mockFetch).toHaveBeenCalledOnce()
+    const [url, options] = mockFetch.mock.calls[0]
+    expect(url).toBe("http://localhost:8644/webhooks/linear")
+    expect(options.method).toBe("POST")
+    expect(options.headers["X-Hub-Signature-256"]).toMatch(/^sha256=[a-f0-9]+$/)
+
+    const bodyPayload = JSON.parse(options.body)
+    expect(bodyPayload._linear_issue_id).toBe(`issue-hermes-${n}`)
+    expect(bodyPayload._linear_identifier).toBe(`PER-${n}`)
+    expect(bodyPayload.prompt).toContain("PER-9001")
+
+    // Should NOT have dispatched via OpenClaw
+    expect(mockDispatchInboundReplyWithBase).not.toHaveBeenCalled()
+  })
+
+  it("logs error when Hermes returns non-OK", async () => {
+    const { handleWebhook } = await import("../webhook-handler.js")
+    const api = makeHermesApi()
+    const n = uid++
+    const payload = makeAgentSessionPrompted({
+      createdAt: `2099-08-02T00:00:${String(n).padStart(2, "0")}.000Z`,
+      agentSession: {
+        id: `sess-hermes-err-${n}`,
+        issue: {
+          id: `issue-hermes-err-${n}`,
+          identifier: `PER-${n + 100}`,
+          title: `Hermes error test`,
+          description: null,
+          url: `https://linear.app/test/issue/PER-${n + 100}`,
+          team: { id: "team-001", key: "PER", name: "Platform" },
+        },
+      },
+      body: "test",
+    })
+
+    mockFetch.mockResolvedValue({ ok: false, status: 502, text: () => Promise.resolve("bad gateway") })
+    const { req, res } = makeSignedReq(payload, SECRET)
+
+    await handleWebhook(api, req, res)
+
+    expect(mockLogger.error).toHaveBeenCalledWith(expect.stringContaining("Hermes dispatch failed"))
+    expect(mockDispatchInboundReplyWithBase).not.toHaveBeenCalled()
+  })
+
+  it("falls back to OpenClaw when dispatchMode is not hermes", async () => {
+    const { handleWebhook } = await import("../webhook-handler.js")
+    const api = makeHermesApi()
+    api.pluginConfig.dispatchMode = "openclaw"
+    delete api.pluginConfig.hermes
+
+    const n = uid++
+    const payload = makeAgentSessionPrompted({
+      createdAt: `2099-08-03T00:00:${String(n).padStart(2, "0")}.000Z`,
+      agentSession: {
+        id: `sess-fallback-${n}`,
+        issue: {
+          id: `issue-fallback-${n}`,
+          identifier: `ENG-${n}`,
+          title: "Fallback test",
+          description: null,
+          url: `https://linear.app/test/issue/ENG-${n}`,
+          team: { id: "team-001", key: "ENG", name: "Engineering" },
+        },
+      },
+      body: "@Linus help",
+    })
+
+    const { req, res } = makeSignedReq(payload, SECRET)
+
+    await handleWebhook(api, req, res)
+
+    expect(mockFetch).not.toHaveBeenCalled()
+    expect(mockDispatchInboundReplyWithBase).toHaveBeenCalled()
+  })
+})

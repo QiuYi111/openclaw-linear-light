@@ -273,6 +273,140 @@ npm run check          # lint + typecheck + test
 
 Zero runtime dependencies. TypeScript strict mode. ESM only. 95%+ test coverage.
 
+## Hermes Agent Setup
+
+[Hermes Agent](https://hermes-agent.nousresearch.com/) by Nous Research is an alternative AI agent backend with built-in learning, skills, MCP integration, and 15+ messaging platform support.
+
+### When to use Hermes
+
+- You prefer Hermes's agent capabilities (skills, memory, MCP)
+- You want multi-platform reply delivery (Telegram, Discord, Slack, etc.)
+- You want Hermes's built-in learning loop and user modeling
+
+### Prerequisites
+
+- [Hermes Agent installed](https://hermes-agent.nousresearch.com/docs/getting-started/installation) and running
+- Linear OAuth token (from OpenClaw plugin's `~/.openclaw/plugins/linear-light/token.json`)
+
+### Step 1: Add Linear API token to Hermes
+
+```bash
+# Read the token from OpenClaw's token store
+TOKEN=$(python3 -c "import json; print(json.load(open('$HOME/.openclaw/plugins/linear-light/token.json'))['accessToken'])")
+
+# Add to Hermes env
+echo "LINEAR_API_TOKEN=$TOKEN" >> ~/.hermes/.env
+```
+
+### Step 2: Install the Linear Workflow Skill
+
+Copy the skill file to Hermes's skills directory:
+
+```bash
+mkdir -p ~/.hermes/skills/linear-workflow
+cp docs/hermes-skill.md ~/.hermes/skills/linear-workflow/SKILL.md
+```
+
+The skill provides Hermes with:
+- Linear GraphQL API access via `curl` (comments, status updates, search)
+- Project memory workflow (read/write `~/clawd/projects/` files)
+- Reply formatting guidelines
+
+### Step 3: Configure Hermes Webhook
+
+In `~/.hermes/config.yaml`, add the webhook platform:
+
+```yaml
+platforms:
+  webhook:
+    enabled: true
+    extra:
+      port: 8644
+      secret: "your-hermes-webhook-secret"
+      routes:
+        linear:
+          secret: "your-hermes-webhook-secret"
+          prompt: "{prompt}"
+          skills: ["linear-workflow"]
+          deliver: "log"
+```
+
+> `deliver: "log"` because Hermes doesn't natively post to Linear.
+> The `linear-workflow` skill handles posting comments directly via the Linear GraphQL API.
+
+### Step 4: Enable Hermes Mode in OpenClaw
+
+Update your OpenClaw config:
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "linear-light": {
+        "config": {
+          "enabled": true,
+          "webhookSecret": "your-linear-webhook-secret",
+          "linearClientId": "...",
+          "linearClientSecret": "...",
+          "dispatchMode": "hermes",
+          "hermes": {
+            "webhookUrl": "http://localhost:8644/webhooks",
+            "webhookSecret": "your-hermes-webhook-secret",
+            "routeName": "linear",
+            "timeoutMs": 15000
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+### Step 5: Restart
+
+```bash
+hermes gateway restart
+openclaw gateway restart
+```
+
+### Step 6: Verify
+
+```bash
+# Check Hermes webhook health
+curl http://localhost:8644/health
+
+# Check plugin status
+curl http://localhost:<openclaw-port>/linear-light/status
+
+# Trigger a test — @mention the agent in a Linear issue
+```
+
+### Feature Comparison
+
+| Feature | OpenClaw Mode | Hermes Mode |
+|---|---|---|
+| HMAC-verified webhooks | ✅ | ✅ |
+| Per-issue sessions | ✅ | ✅ |
+| Real-time activity streaming | ✅ | ❌ |
+| Linear API tools | ✅ (native) | ✅ (via skill) |
+| Project memory (git) | ✅ (auto) | ✅ (via skill) |
+| Completion loop | ✅ (built-in) | ❌ (use Hermes cron) |
+| Auto In Progress | ✅ | ✅ (via skill) |
+| Multi-platform reply | ❌ | ✅ (15+) |
+| MCP integration | ❌ | ✅ |
+| Skills system | ❌ | ✅ |
+| Memory/learning | ❌ | ✅ |
+
+### Config Reference (Hermes)
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `dispatchMode` | string | `"openclaw"` | `"openclaw"` or `"hermes"` |
+| `hermes.webhookUrl` | string | — | Hermes webhook endpoint URL |
+| `hermes.webhookSecret` | string | — | HMAC secret for Hermes payloads |
+| `hermes.routeName` | string | `"linear"` | Hermes webhook route name |
+| `hermes.timeoutMs` | number | `15000` | Request timeout in ms |
+
 ## Credits
 
 Infrastructure borrowed from:
