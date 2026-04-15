@@ -32,6 +32,7 @@ import {
   setCompletionLoopLogger,
 } from "./src/completion-loop.js"
 import { validateConfig } from "./src/config-validation.js"
+import { validateHermesConfig } from "./src/hermes-adapter.js"
 import { handleOAuthCallback, handleOAuthInit } from "./src/oauth-handler.js"
 import { getLinearApi, setLinearApi, setLinearRuntime } from "./src/runtime.js"
 import { dispatchCompletionPrompt, handleWebhook, setFallbackDispatchContext } from "./src/webhook-handler.js"
@@ -164,6 +165,12 @@ export default function register(api: OpenClawPluginApi) {
 
   // Register as a first-class channel — this is what makes deliver work
   api.registerChannel({ plugin: linearPlugin as ChannelPlugin })
+
+  // Log Hermes mode status
+  const hermesValidation = validateHermesConfig(config || {})
+  if (hermesValidation.hermesConfig) {
+    api.logger.info(`Linear Light: Hermes mode enabled, forwarding to ${hermesValidation.hermesConfig.webhookUrl}`)
+  }
 
   // Register Linear operation tools
   for (const tool of createLinearTools(api)) {

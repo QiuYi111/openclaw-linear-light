@@ -10,13 +10,13 @@ import { createHmac, timingSafeEqual } from "node:crypto"
 import { existsSync } from "node:fs"
 import { join } from "node:path"
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk"
-import { dispatchInboundReplyWithBase } from "openclaw/plugin-sdk/inbound-reply-dispatch"
-import type { OpenClawConfig } from "openclaw/plugin-sdk"
+import { dispatchInboundReplyWithBase, type OpenClawConfig } from "openclaw/plugin-sdk/inbound-reply-dispatch"
 import { agentSessionMap, identifierSessionMap } from "../index.js"
 import type { LinearAgentApi, Logger } from "./api/linear-api.js"
 import { resolveLinearToken } from "./api/linear-api.js"
 import { resolveProjectInfo, syncIssueConversation } from "./api/project-store.js"
 import { setCompletionLoopConfig, startCompletionLoop } from "./completion-loop.js"
+import { dispatchToHermes, validateHermesConfig } from "./hermes-adapter.js"
 import { getLinearApi, getLinearRuntime } from "./runtime.js"
 import type {
   AgentSessionCreatedPayload,
@@ -494,6 +494,23 @@ async function dispatchToAgent(
   },
 ): Promise<void> {
   const { issue, body, config } = params
+
+  // --- Hermes dispatch mode ---
+  const hermesValidation = validateHermesConfig(config || {})
+  if (hermesValidation.hermesConfig) {
+    const result = await dispatchToHermes({
+      issue: params.issue,
+      body,
+      config: hermesValidation.hermesConfig,
+      logger: api.logger as unknown as Logger,
+    })
+    if (!result.ok) {
+      api.logger.error(`Linear Light: Hermes dispatch failed for ${issue.identifier}: ${result.error}`)
+    }
+    api.logger.info(`Linear Light: dispatched to Hermes for ${issue.identifier}`)
+    return
+  }
+
   const core = getLinearRuntime()
   const cfg = api.config as OpenClawConfig
 
