@@ -6,8 +6,7 @@
  */
 
 import type { PluginRuntime } from "openclaw/plugin-sdk"
-// @ts-expect-error — exported from local plugin-sdk but may not be in CI's version
-import { createPluginRuntimeStore } from "openclaw/plugin-sdk"
+import { createPluginRuntimeStore } from "openclaw/plugin-sdk/runtime-store"
 import type { LinearAgentApi } from "./api/linear-api.js"
 
 export const { setRuntime: setLinearRuntime, getRuntime: getLinearRuntime } = createPluginRuntimeStore<PluginRuntime>(
