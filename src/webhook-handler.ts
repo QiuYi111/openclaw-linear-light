@@ -10,14 +10,15 @@ import { createHmac, timingSafeEqual } from "node:crypto"
 import { existsSync } from "node:fs"
 import { join } from "node:path"
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk"
-import type { OpenClawConfig } from "openclaw/plugin-sdk/config-runtime"
-import { dispatchInboundReplyWithBase } from "openclaw/plugin-sdk/inbound-reply-dispatch"
+import {
+  dispatchInboundReplyWithBase,
+  type OpenClawConfig,
+} from "openclaw/plugin-sdk/inbound-reply-dispatch"
 import { agentSessionMap, identifierSessionMap } from "../index.js"
 import type { LinearAgentApi, Logger } from "./api/linear-api.js"
 import { resolveLinearToken } from "./api/linear-api.js"
 import { resolveProjectInfo, syncIssueConversation } from "./api/project-store.js"
 import { setCompletionLoopConfig, startCompletionLoop } from "./completion-loop.js"
-import { dispatchToHermes, validateHermesConfig } from "./hermes-adapter.js"
 import { getLinearApi, getLinearRuntime } from "./runtime.js"
 import type {
   AgentSessionCreatedPayload,
@@ -28,8 +29,15 @@ import type {
   ServerResponse,
 } from "./types.js"
 import { sanitizePromptInput } from "./utils.js"
+import { dispatchToHermes, validateHermesConfig, type HermesConfig } from "./hermes-adapter.js"
+import type { LinearWebhookIssue } from "./types.js"
 
 const CHANNEL_ID = "linear" as const
+
+/** Skip Linear API calls for test payloads (non-UUID issue IDs) */
+function isTestIssue(issueId: string): boolean {
+  return !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(issueId)
+}
 
 const DEFAULT_AGENT_IDENTITY =
   "You are OpenClaw, a Linear workflow assistant. " +
@@ -286,9 +294,12 @@ async function handleSessionCreated(
   // Capture dispatch context for completion loop
   captureDispatchContext(api, config, issue.id)
 
+  // Skip Linear API calls for test payloads (non-UUID issue IDs)
+  const _isTest = isTestIssue(issue.id)
+
   // Update issue status to In Progress
-  const linearApi = makeLinearApi(config, api)
-  if (config?.autoInProgress !== false && linearApi) {
+  const linearApi = _isTest ? null : makeLinearApi(config, api)
+  if (!_isTest && config?.autoInProgress !== false && linearApi) {
     try {
       await linearApi.updateIssueState(issue.id, "In Progress")
       api.logger.info(`Linear Light: ${issue.identifier} → In Progress`)
@@ -349,12 +360,14 @@ async function handleSessionCreated(
   await dispatchToAgent(api, { issue, body, config })
 
   // Start completion loop — periodically prompt agent if issue not in terminal state
-  setCompletionLoopConfig(config)
-  startCompletionLoop({
-    issueId: issue.id,
-    issueIdentifier: issue.identifier,
-    sessionKey: `agent:main:linear:direct:${issue.identifier}`,
-  })
+  if (!_isTest) {
+    setCompletionLoopConfig(config)
+    startCompletionLoop({
+      issueId: issue.id,
+      issueIdentifier: issue.identifier,
+      sessionKey: `agent:main:linear:direct:${issue.identifier}`,
+    })
+  }
 }
 
 async function handleSessionPrompted(
@@ -500,7 +513,12 @@ async function dispatchToAgent(
   const hermesValidation = validateHermesConfig(config || {})
   if (hermesValidation.hermesConfig) {
     const result = await dispatchToHermes({
-      issue: params.issue,
+        issue: {
+        id: params.issue.id,
+        identifier: params.issue.identifier,
+        title: params.issue.title,
+        url: params.issue.url || "",
+      },
       body,
       config: hermesValidation.hermesConfig,
       logger: api.logger as unknown as Logger,
@@ -512,6 +530,7 @@ async function dispatchToAgent(
     return
   }
 
+  // --- Default OpenClaw dispatch mode ---
   const core = getLinearRuntime()
   const cfg = api.config as OpenClawConfig
 
@@ -525,7 +544,9 @@ async function dispatchToAgent(
     peer: { kind: "direct", id: peerId },
   })
 
-  api.logger.info(`Linear Light: route resolved: agentId=${route.agentId} sessionKey=${route.sessionKey}`)
+  api.logger.info(
+    `Linear Light: route resolved: agentId=${route.agentId} sessionKey=${route.sessionKey} model=${route.model}`,
+  )
 
   const storePath = core.channel.session.resolveStorePath((cfg as any).session?.store, { agentId: route.agentId })
 

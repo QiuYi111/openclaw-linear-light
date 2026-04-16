@@ -14,22 +14,25 @@
  *
  * Config:
  *   dispatchMode: "hermes"
- *   hermes.webhookUrl: "http://hermes-host:8644/webhooks"
- *   hermes.webhookSecret: HMAC secret for signing payloads to Hermes
- *   hermes.routeName: "linear" (default)
+ *   hermes.webhookUrl: "http://localhost:8644/linear/hermes" (full route URL)
+ *   hermes.routeSecret: HMAC secret for signing payloads to this route
+ *   hermes.timeoutMs: optional request timeout in ms (default: 15000)
  */
 
 import { createHmac } from "node:crypto"
-import type { Logger } from "./api/linear-api.js"
+import type { Logger } from "./core/logger.js"
+import type { LinearWebhookIssue } from "./core/types.js"
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
 export interface HermesConfig {
+  /** Full webhook URL including route path, e.g. "http://localhost:8644/linear/hermes" */
   webhookUrl: string
-  webhookSecret: string
-  routeName?: string
+  /** Route-specific HMAC signing secret */
+  routeSecret: string
+  /** Request timeout in milliseconds (default: 15000) */
   timeoutMs?: number
 }
 
@@ -38,20 +41,20 @@ export interface HermesConfig {
 // ---------------------------------------------------------------------------
 
 export async function dispatchToHermes(params: {
-  issue: { id: string; identifier: string; title: string; description?: string | null; url?: string }
+  issue: LinearWebhookIssue
   body: string
+  projectDir?: string
   config: HermesConfig
   logger?: Logger
 }): Promise<{ ok: boolean; error?: string }> {
-  const { issue, body, config, logger } = params
+  const { issue, body, projectDir, config, logger } = params
 
-  const routeName = config.routeName || "linear"
-  const url = config.webhookUrl.endsWith("/") ? `${config.webhookUrl}${routeName}` : `${config.webhookUrl}/${routeName}`
+  const url = config.webhookUrl
 
   // Build payload that Hermes's webhook adapter will receive.
   // The prompt template in Hermes config extracts {prompt} from this.
   // The linear-workflow skill reads _linear_issue_id to post replies.
-  const payload = {
+  const payload: Record<string, unknown> = {
     type: "Issue",
     action: "agent_trigger",
     prompt: body,
@@ -61,8 +64,12 @@ export async function dispatchToHermes(params: {
     _linear_url: issue.url,
   }
 
+  if (projectDir) {
+    payload._linear_project_dir = projectDir
+  }
+
   const bodyStr = JSON.stringify(payload)
-  const signature = createHmac("sha256", config.webhookSecret).update(bodyStr).digest("hex")
+  const signature = createHmac("sha256", config.routeSecret).update(bodyStr).digest("hex")
 
   logger?.info(`Hermes adapter: dispatching to ${url} for ${issue.identifier}`)
 
@@ -118,8 +125,8 @@ export function validateHermesConfig(config: Record<string, unknown>): {
     errors.push("hermes.webhookUrl is required when dispatchMode is 'hermes'")
   }
 
-  if (!hermes.webhookSecret || typeof hermes.webhookSecret !== "string") {
-    errors.push("hermes.webhookSecret is required when dispatchMode is 'hermes'")
+  if (!hermes.routeSecret || typeof hermes.routeSecret !== "string") {
+    errors.push("hermes.routeSecret is required when dispatchMode is 'hermes'")
   }
 
   if (errors.length > 0) {
@@ -130,8 +137,7 @@ export function validateHermesConfig(config: Record<string, unknown>): {
     valid: true,
     hermesConfig: {
       webhookUrl: hermes.webhookUrl as string,
-      webhookSecret: hermes.webhookSecret as string,
-      routeName: (hermes.routeName as string) || undefined,
+      routeSecret: hermes.routeSecret as string,
       timeoutMs: (hermes.timeoutMs as number) || undefined,
     },
     errors: [],
