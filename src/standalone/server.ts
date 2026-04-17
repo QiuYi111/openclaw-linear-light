@@ -8,22 +8,29 @@
  *   GET  /health   — Health check
  */
 
-import { createServer, type IncomingMessage, type ServerResponse, type Server } from "node:http"
+import { existsSync } from "node:fs"
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http"
 import { homedir } from "node:os"
 import { join } from "node:path"
-import { existsSync } from "node:fs"
+import type { LinearAgentApi } from "../core/linear-client.js"
+import { createConsoleLogger } from "../core/logger.js"
 import { readBody, wasRecentlyProcessed } from "../core/payload.js"
 import { verifyLinearSignature } from "../core/signature.js"
-import { createConsoleLogger } from "../core/logger.js"
-import { dispatchToHermes, type HermesConfig } from "../hermes-adapter.js"
 import type {
   AgentSessionCreatedPayload,
   AgentSessionPromptedPayload,
   CommentCreatePayload,
   LinearWebhookPayload,
 } from "../core/types.js"
-import type { LinearAgentApi } from "../core/linear-client.js"
+import { dispatchToHermes, type HermesConfig } from "../hermes-adapter.js"
 import type { StandaloneConfig } from "./config.js"
+
+// ---------------------------------------------------------------------------
+// Session maps — bridge Comment.create → agent session ID
+// ---------------------------------------------------------------------------
+
+const agentSessionMap = new Map<string, string>()
+const identifierSessionMap = new Map<string, string>()
 
 // ---------------------------------------------------------------------------
 // Logger
@@ -60,10 +67,14 @@ function sanitize(text: string, maxLength = 4000): string {
  *   - AgentSessionEvent.prompted — follow-up prompt within a session
  *   - Comment.create             — mention-triggered comment (fallback)
  */
-function buildPromptBody(payload: LinearWebhookPayload): {
+function buildPromptBody(
+  payload: LinearWebhookPayload,
+  agentIdentity?: string,
+): {
   prompt: string
   issue: { id: string; identifier: string; title: string; url: string; projectName?: string }
 } | null {
+  const identity = agentIdentity || DEFAULT_AGENT_IDENTITY
   const { type, action } = payload
 
   // --- AgentSessionEvent.created ---
@@ -90,12 +101,18 @@ function buildPromptBody(payload: LinearWebhookPayload): {
       isMentionTriggered ? `\n---\n**User comment:**\n${sanitizedPrompt}` : "",
       `\n---\nIssue URL: ${issue.url}`,
       ``,
-      DEFAULT_AGENT_IDENTITY,
+      identity,
     ].join("\n")
 
     return {
       prompt: body,
-      issue: { id: issue.id, identifier: issue.identifier, title: issue.title, url: issue.url, projectName: issue.project?.name },
+      issue: {
+        id: issue.id,
+        identifier: issue.identifier,
+        title: issue.title,
+        url: issue.url,
+        projectName: issue.project?.name,
+      },
     }
   }
 
@@ -110,16 +127,16 @@ function buildPromptBody(payload: LinearWebhookPayload): {
 
     const sanitizedPrompt = sanitize(activity.content.body)
 
-    const body = [
-      `[Linear ${session.issue.identifier} follow-up]`,
-      sanitizedPrompt,
-      ``,
-      DEFAULT_AGENT_IDENTITY,
-    ].join("\n")
+    const body = [`[Linear ${session.issue.identifier} follow-up]`, sanitizedPrompt, ``, identity].join("\n")
 
     return {
       prompt: body,
-      issue: { id: session.issue.id, identifier: session.issue.identifier, title: session.issue.title, url: session.issue.url },
+      issue: {
+        id: session.issue.id,
+        identifier: session.issue.identifier,
+        title: session.issue.title,
+        url: session.issue.url,
+      },
     }
   }
 
@@ -131,12 +148,7 @@ function buildPromptBody(payload: LinearWebhookPayload): {
 
     // For Comment.create we don't have full issue details in the webhook payload,
     // so we build a minimal prompt with what we have.
-    const body = [
-      `[Linear Comment]`,
-      sanitize(comment.body),
-      ``,
-      DEFAULT_AGENT_IDENTITY,
-    ].join("\n")
+    const body = [`[Linear Comment]`, sanitize(comment.body), ``, identity].join("\n")
 
     return {
       prompt: body,
@@ -147,12 +159,38 @@ function buildPromptBody(payload: LinearWebhookPayload): {
   return null
 }
 
+/** Build project memory context section for prompt injection */
+function buildProjectContextSection(
+  projectDir: string | null,
+  identifier: string,
+  projectMemoryEnabled: boolean | undefined,
+): string {
+  if (!(projectMemoryEnabled && projectDir)) return ""
+
+  const files: string[] = []
+  for (const name of ["AGENTS.md", "Context.md", "README.md"]) {
+    if (existsSync(join(projectDir, name))) files.push(name)
+  }
+  if (files.length === 0) return ""
+
+  return [
+    `\n---\n📁 Project Memory for ${identifier}`,
+    `\nProject directory: \`${projectDir}\``,
+    `\n**Before starting work, read these files to restore context:**`,
+    ...files.map((f) => `- \`${f}\``),
+    `\n**When your session completes or you make significant progress:**`,
+    `1. Update \`${projectDir}/Context.md\` with current state, key decisions, and findings`,
+    `2. Update \`${projectDir}/README.md\` with progress and next steps`,
+    `\n`,
+  ].join("\n")
+}
+
 /** Resolve project directory for an issue identifier (e.g. "PER-85" → ~/clawd/projects/PER-85/) */
 function resolveProjectDir(identifier: string, projectName?: string): string | null {
   const base = join(homedir(), "clawd", "projects")
   const candidates = [
-    projectName ? join(base, projectName) : null,  // project name: openclaw-linear-light
-    join(base, identifier),           // exact match: PER-85
+    projectName ? join(base, projectName) : null, // project name: openclaw-linear-light
+    join(base, identifier), // exact match: PER-85
     join(base, identifier.toLowerCase()), // lowercase
   ].filter(Boolean) as string[]
   for (const dir of candidates) {
@@ -170,12 +208,15 @@ async function emitInitialActivity(
   agentSessionId: string | undefined,
   identifier: string,
   title: string,
+  initialResponseTemplate?: string,
 ): Promise<void> {
-  if (!api || !agentSessionId) return
+  if (!(api && agentSessionId)) return
   try {
+    const template = initialResponseTemplate || "Received, processing {identifier}: {title}"
+    const message = template.replace("{identifier}", identifier).replace("{title}", title)
     await api.emitActivity(agentSessionId, {
       type: "response",
-      body: `Received, processing ${identifier}: ${title}`,
+      body: message,
     })
     log.info(`emitted initial activity for ${identifier}`)
   } catch (err) {
@@ -263,8 +304,29 @@ async function handleWebhook(
     return
   }
 
+  // 3.6 Store agent session ID in maps (for Comment.create lookup)
+  if (body.type === "AgentSessionEvent" && (body.action === "created" || body.action === "prompted")) {
+    const session = (body as AgentSessionCreatedPayload).agentSession
+    if (session?.id && session.issue) {
+      agentSessionMap.set(session.issue.id, session.id)
+      identifierSessionMap.set(session.issue.identifier, session.id)
+    }
+  }
+
+  // 3.7 Mention trigger filter for Comment.create
+  if (body.type === "Comment" && body.action === "create") {
+    const comment = (body as CommentCreatePayload).data
+    const trigger = config.mentionTrigger || "Linus"
+    if (comment?.body && !comment.body.toLowerCase().includes(trigger.toLowerCase())) {
+      log.info(`comment does not contain mention trigger "${trigger}", skipping`)
+      res.writeHead(200, { "Content-Type": "application/json" })
+      res.end(JSON.stringify({ ok: true, handled: false, reason: "no-mention-trigger" }))
+      return
+    }
+  }
+
   // 4. Extract issue info and build prompt
-  const result = buildPromptBody(body)
+  const result = buildPromptBody(body, config.agentIdentity)
   if (!result) {
     log.info(`unhandled webhook type: ${body.type}/${body.action}`)
     res.writeHead(200, { "Content-Type": "application/json" })
@@ -290,19 +352,37 @@ async function handleWebhook(
   }
 
   // 6. Emit initial activity + auto-set In Progress
-  const agentSessionId = (body as AgentSessionCreatedPayload).agentSession?.id
-  emitInitialActivity(linearApi, agentSessionId, result.issue.identifier, result.issue.title)
+  // Try payload first, then session maps (Comment.create never carries agentSession)
+  let agentSessionId: string | undefined = (body as AgentSessionCreatedPayload).agentSession?.id
+  if (!agentSessionId && result.issue.id) {
+    agentSessionId = agentSessionMap.get(result.issue.id) || identifierSessionMap.get(result.issue.identifier)
+  }
+  emitInitialActivity(
+    linearApi,
+    agentSessionId,
+    result.issue.identifier,
+    result.issue.title,
+    config.initialResponseTemplate,
+  )
 
   // Auto-set issue to In Progress
   if (config.autoInProgress && result.issue.id && linearApi) {
-    linearApi.updateIssueState(result.issue.id, "In Progress").then((ok) => {
-      if (ok) log.info(`set ${result.issue.identifier} to In Progress`)
-      else log.warn(`failed to set ${result.issue.identifier} to In Progress`)
-    }).catch((err) => log.warn(`updateIssueState error: ${err}`))
+    linearApi
+      .updateIssueState(result.issue.id, "In Progress")
+      .then((ok) => {
+        if (ok) log.info(`set ${result.issue.identifier} to In Progress`)
+        else log.warn(`failed to set ${result.issue.identifier} to In Progress`)
+      })
+      .catch((err) => log.warn(`updateIssueState error: ${err}`))
   }
 
   // 7. Resolve project directory
-  const projectDir = result.issue.identifier ? resolveProjectDir(result.issue.identifier, result.issue.projectName) : null
+  const projectDir = result.issue.identifier
+    ? resolveProjectDir(result.issue.identifier, result.issue.projectName)
+    : null
+
+  // 7.5 Build project memory context and append to prompt
+  const projectContext = buildProjectContextSection(projectDir, result.issue.identifier, config.projectMemoryEnabled)
 
   // 8. Dispatch to Hermes
   const hermesConfig: HermesConfig = {
@@ -319,7 +399,7 @@ async function handleWebhook(
         title: result.issue.title,
         url: result.issue.url,
       },
-      body: result.prompt,
+      body: result.prompt + projectContext,
       projectDir: projectDir ?? undefined,
       config: hermesConfig,
       logger: log,
@@ -347,10 +427,7 @@ async function handleWebhook(
 // Server creation
 // ---------------------------------------------------------------------------
 
-export function createGatewayServer(
-  config: StandaloneConfig,
-  linearApi: LinearAgentApi | null = null,
-): Server {
+export function createGatewayServer(config: StandaloneConfig, linearApi: LinearAgentApi | null = null): Server {
   const server = createServer((req, res) => {
     handleRequest(req, res, config, linearApi).catch((err) => {
       log.error(`unhandled error: ${err instanceof Error ? err.message : String(err)}`)
