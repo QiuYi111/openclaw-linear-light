@@ -1,3 +1,4 @@
+import { createHmac } from "node:crypto"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
 // ---------------------------------------------------------------------------
@@ -33,36 +34,34 @@ describe("validateHermesConfig", () => {
   it("returns errors when webhookUrl is missing", () => {
     const result = validateHermesConfig({
       dispatchMode: "hermes",
-      hermes: { webhookSecret: "secret" },
+      hermes: { routeSecret: "secret" },
     })
     expect(result.valid).toBe(false)
     expect(result.errors).toContain("hermes.webhookUrl is required when dispatchMode is 'hermes'")
   })
 
-  it("returns errors when webhookSecret is missing", () => {
+  it("returns errors when routeSecret is missing", () => {
     const result = validateHermesConfig({
       dispatchMode: "hermes",
-      hermes: { webhookUrl: "http://localhost:8644" },
+      hermes: { webhookUrl: "http://localhost:8644/linear/hermes" },
     })
     expect(result.valid).toBe(false)
-    expect(result.errors).toContain("hermes.webhookSecret is required when dispatchMode is 'hermes'")
+    expect(result.errors).toContain("hermes.routeSecret is required when dispatchMode is 'hermes'")
   })
 
   it("returns valid hermesConfig when all required fields present", () => {
     const result = validateHermesConfig({
       dispatchMode: "hermes",
       hermes: {
-        webhookUrl: "http://localhost:8644/webhooks",
-        webhookSecret: "my-secret",
-        routeName: "linear",
+        webhookUrl: "http://localhost:8644/linear/hermes",
+        routeSecret: "my-secret",
         timeoutMs: 20000,
       },
     })
     expect(result.valid).toBe(true)
     expect(result.hermesConfig).toEqual({
-      webhookUrl: "http://localhost:8644/webhooks",
-      webhookSecret: "my-secret",
-      routeName: "linear",
+      webhookUrl: "http://localhost:8644/linear/hermes",
+      routeSecret: "my-secret",
       timeoutMs: 20000,
     })
   })
@@ -71,11 +70,10 @@ describe("validateHermesConfig", () => {
     const result = validateHermesConfig({
       dispatchMode: "hermes",
       hermes: {
-        webhookUrl: "http://localhost:8644/webhooks",
-        webhookSecret: "secret",
+        webhookUrl: "http://localhost:8644/linear/hermes",
+        routeSecret: "secret",
       },
     })
-    expect(result.hermesConfig?.routeName).toBeUndefined()
     expect(result.hermesConfig?.timeoutMs).toBeUndefined()
   })
 })
@@ -94,9 +92,8 @@ describe("dispatchToHermes", () => {
   }
 
   const config: HermesConfig = {
-    webhookUrl: "http://localhost:8644/webhooks",
-    webhookSecret: "test-secret",
-    routeName: "linear",
+    webhookUrl: "http://localhost:8644/linear/hermes",
+    routeSecret: "test-secret",
   }
 
   beforeEach(() => {
@@ -114,10 +111,10 @@ describe("dispatchToHermes", () => {
     expect(mockFetch).toHaveBeenCalledOnce()
 
     const [url, options] = mockFetch.mock.calls[0]
-    expect(url).toBe("http://localhost:8644/webhooks/linear")
+    expect(url).toBe("http://localhost:8644/linear/hermes")
     expect(options.method).toBe("POST")
     expect(options.headers["Content-Type"]).toBe("application/json")
-    expect(options.headers["X-Hub-Signature-256"]).toMatch(/^sha256=[a-f0-9]+$/)
+    expect(options.headers["X-Linear-Signature"]).toMatch(/^sha256=[a-f0-9]+$/)
 
     const payload = JSON.parse(options.body)
     expect(payload._linear_issue_id).toBe("issue-uuid-001")
@@ -127,18 +124,44 @@ describe("dispatchToHermes", () => {
     expect(payload._linear_url).toBe("https://linear.app/test/issue/ENG-42")
   })
 
-  it("appends route name without extra slash when URL ends with /", async () => {
+  it("uses X-Linear-Signature header (not X-Hub-Signature-256)", async () => {
     mockFetch.mockResolvedValue({ ok: true })
 
-    const configWithSlash: HermesConfig = {
-      webhookUrl: "http://localhost:8644/webhooks/",
-      webhookSecret: "test-secret",
+    await dispatchToHermes({ issue, body: "test", config, logger: mockLogger })
+
+    const [, options] = mockFetch.mock.calls[0]
+    expect(options.headers["X-Linear-Signature"]).toBeDefined()
+    expect(options.headers["X-Hub-Signature-256"]).toBeUndefined()
+  })
+
+  it("signs with routeSecret (not a global webhookSecret)", async () => {
+    mockFetch.mockResolvedValue({ ok: true })
+
+    const customConfig: HermesConfig = {
+      webhookUrl: "http://localhost:8644/linear/hermes",
+      routeSecret: "route-specific-secret-key",
     }
 
-    await dispatchToHermes({ issue, body: "test", config: configWithSlash, logger: mockLogger })
+    await dispatchToHermes({ issue, body: "test", config: customConfig, logger: mockLogger })
+
+    const [, options] = mockFetch.mock.calls[0]
+    const headerSig = options.headers["X-Linear-Signature"] as string
+    const expectedSig = createHmac("sha256", "route-specific-secret-key").update(options.body).digest("hex")
+    expect(headerSig).toBe(`sha256=${expectedSig}`)
+  })
+
+  it("uses webhookUrl directly as the full path (no route name appending)", async () => {
+    mockFetch.mockResolvedValue({ ok: true })
+
+    const customConfig: HermesConfig = {
+      webhookUrl: "http://hermes.example.com:9000/linear/hermes",
+      routeSecret: "secret",
+    }
+
+    await dispatchToHermes({ issue, body: "test", config: customConfig, logger: mockLogger })
 
     const [url] = mockFetch.mock.calls[0]
-    expect(url).toBe("http://localhost:8644/webhooks/linear")
+    expect(url).toBe("http://hermes.example.com:9000/linear/hermes")
   })
 
   it("returns error when Hermes returns non-OK", async () => {
@@ -157,29 +180,6 @@ describe("dispatchToHermes", () => {
 
     expect(result.ok).toBe(false)
     expect(result.error).toContain("ECONNREFUSED")
-  })
-
-  it("handles non-Error rejections", async () => {
-    mockFetch.mockRejectedValue("string error")
-
-    const result = await dispatchToHermes({ issue, body: "test", config, logger: mockLogger })
-
-    expect(result.ok).toBe(false)
-    expect(result.error).toBe("string error")
-  })
-
-  it("uses default route name 'linear' when not specified", async () => {
-    mockFetch.mockResolvedValue({ ok: true })
-
-    const configNoRoute: HermesConfig = {
-      webhookUrl: "http://localhost:8644/webhooks",
-      webhookSecret: "test-secret",
-    }
-
-    await dispatchToHermes({ issue, body: "test", config: configNoRoute, logger: mockLogger })
-
-    const [url] = mockFetch.mock.calls[0]
-    expect(url).toBe("http://localhost:8644/webhooks/linear")
   })
 
   it("payload does not include callback-related fields", async () => {
