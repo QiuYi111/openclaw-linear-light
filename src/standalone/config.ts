@@ -30,6 +30,14 @@ export interface StandaloneConfig {
   terminalStateTypes?: string[]
   tokenStorePath?: string
   logLevel?: "debug" | "info" | "warn" | "error"
+  /** Trigger word for Comment.create fallback (case-insensitive substring match). Default: "Linus" */
+  mentionTrigger?: string
+  /** Custom agent identity injected into prompts. Falls back to built-in default. */
+  agentIdentity?: string
+  /** Enable project memory context injection (read AGENTS.md, Context.md, etc.). Default: true */
+  projectMemoryEnabled?: boolean
+  /** Template for initial response activity. {identifier} and {title} are replaced. */
+  initialResponseTemplate?: string
 }
 
 // ---------------------------------------------------------------------------
@@ -103,6 +111,11 @@ export function loadConfig(configPath?: string): StandaloneConfig {
     botUserId: (fileConfig.botUserId as string) || env("LINEAR_BOT_USER_ID") || "",
     autoInProgress: (fileConfig.autoInProgress as boolean) ?? true,
     terminalStateTypes: (fileConfig.terminalStateTypes as string[]) || ["completed", "canceled"],
+
+    mentionTrigger: (fileConfig.mentionTrigger as string) || "Linus",
+    agentIdentity: (fileConfig.agentIdentity as string) || undefined,
+    projectMemoryEnabled: (fileConfig.projectMemoryEnabled as boolean) ?? true,
+    initialResponseTemplate: (fileConfig.initialResponseTemplate as string) || undefined,
 
     logLevel: (fileConfig.logLevel as StandaloneConfig["logLevel"]) || "info",
   }
