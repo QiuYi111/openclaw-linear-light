@@ -13,11 +13,12 @@
  * Reads token from ~/.linear-gateway/token.json or LINEAR_API_TOKEN env var.
  */
 
+import { existsSync, readFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
-import { existsSync, readFileSync } from "node:fs"
 import { LinearAgentApi, resolveLinearToken } from "../core/linear-client.js"
 import { FileTokenStore } from "./token-store.js"
+import { runWatchdog, type WatchdogOptions } from "./watchdog.js"
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -67,7 +68,9 @@ Commands:
   status <issue-id> <state>   Update issue status (e.g. "In Progress", "Done")
   emit <session-id> <body>    Emit activity to an agent session
   get <issue-id>              Get issue details (JSON)
-  search <query>              Search issues (JSON)`)
+  search <query>              Search issues (JSON)
+  watchdog [--port N] [--fix] [--json]
+                              Health-check the gateway (token, network, process)`)
 }
 
 // ---------------------------------------------------------------------------
@@ -87,7 +90,7 @@ async function cmdComment(api: LinearAgentApi, args: string[]): Promise<void> {
 
 async function cmdStatus(api: LinearAgentApi, args: string[]): Promise<void> {
   const [issueId, stateName] = args
-  if (!issueId || !stateName) {
+  if (!(issueId && stateName)) {
     console.error("Usage: linear status <issue-id> <state-name>")
     process.exit(1)
   }
@@ -123,7 +126,9 @@ async function cmdSearch(api: LinearAgentApi, args: string[]): Promise<void> {
     process.exit(1)
   }
   const data = await api.gql<{
-    issueSearch: { nodes: Array<{ id: string; identifier: string; title: string; state: { name: string }; url: string }> }
+    issueSearch: {
+      nodes: Array<{ id: string; identifier: string; title: string; state: { name: string }; url: string }>
+    }
   }>(
     `query($query: String!, $first: Int) {
       issueSearch(query: $query, first: $first) {
@@ -135,12 +140,43 @@ async function cmdSearch(api: LinearAgentApi, args: string[]): Promise<void> {
   console.log(JSON.stringify(data.issueSearch.nodes, null, 2))
 }
 
+async function cmdWatchdog(args: string[]): Promise<void> {
+  const opts: WatchdogOptions = {}
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "--port" && args[i + 1]) {
+      opts.port = Number.parseInt(args[++i], 10)
+    } else if (args[i] === "--fix") {
+      opts.fix = true
+    } else if (args[i] === "--json") {
+      opts.json = true
+    } else if (args[i] === "--token-store" && args[i + 1]) {
+      opts.tokenStorePath = args[++i]
+    }
+  }
+
+  const report = await runWatchdog(opts)
+
+  if (opts.json) {
+    console.log(JSON.stringify(report, null, 2))
+  } else {
+    const status = report.healthy ? "✅ healthy" : "❌ unhealthy"
+    console.log(`[${new Date().toISOString()}] ${status}`)
+    for (const check of report.checks) {
+      const icon = check.ok ? "✓" : "✗"
+      const repair = check.repaired ? " [REPAIRED]" : ""
+      console.log(`  ${icon} ${check.name}: ${check.detail ?? "ok"}${repair}`)
+    }
+  }
+
+  process.exit(report.healthy ? 0 : 1)
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
 async function main(): Promise<void> {
-  const [,, command, ...args] = process.argv
+  const [, , command, ...args] = process.argv
 
   if (!command || command === "help" || command === "-h") {
     printUsage()
@@ -165,6 +201,9 @@ async function main(): Promise<void> {
     case "search":
       await cmdSearch(api, args)
       break
+    case "watchdog":
+      await cmdWatchdog(args)
+      return // watchdog handles its own exit code
     default:
       console.error(`Unknown command: ${command}`)
       printUsage()
