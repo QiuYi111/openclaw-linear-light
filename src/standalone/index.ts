@@ -74,8 +74,8 @@ async function main(): Promise<void> {
     linearApi = new LinearAgentApi(tokenInfo.accessToken, {
       refreshToken: tokenInfo.refreshToken,
       expiresAt: tokenInfo.expiresAt,
-      clientId: process.env.LINEAR_CLIENT_ID,
-      clientSecret: process.env.LINEAR_CLIENT_SECRET,
+      clientId: config.linear.clientId || process.env.LINEAR_CLIENT_ID,
+      clientSecret: config.linear.clientSecret || process.env.LINEAR_CLIENT_SECRET,
       tokenStore,
     })
     log.info("LinearAgentApi initialized")
